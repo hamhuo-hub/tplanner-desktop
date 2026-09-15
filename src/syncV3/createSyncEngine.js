@@ -40,13 +40,12 @@ export async function createSyncEngine({
     waitMs = 25_000,
     decompress,
     onSnapshotInstalled,
-    deltaEnabled = true,
 } = {}) {
     const uploader = createUploader({ store, fetchFn, serverUrl });
     const installer = createSnapshotInstaller({ store, fetchFn, serverUrl, decompress });
-    const deltaInstaller = createDeltaInstaller({ store, fetchFn, serverUrl, deltaEnabled });
+    const deltaInstaller = createDeltaInstaller({ store, fetchFn, serverUrl });
 
-    // 下行统一入口(§9.3):capability + 本地 canary 开关都允许且已有 cursor 时
+    // 下行统一入口(§9.3):服务器 capability 允许且已有 cursor 时
     // 走 delta;任何断链/410/未知 type 都退回完整快照逃生舱。快照安装成功会
     // 用 manifest.cursor 重建 delta 起点,两条路径永远互不冲突。
     async function syncDownlink(capabilities) {

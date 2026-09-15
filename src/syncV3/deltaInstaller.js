@@ -80,10 +80,9 @@ export function applyChangesToMirror(mirror, changes) {
     return next;
 }
 
-export function createDeltaInstaller({ store, fetchFn, serverUrl, deltaEnabled = true } = {}) {
+export function createDeltaInstaller({ store, fetchFn, serverUrl } = {}) {
     function shouldUseDelta(capabilities, meta) {
-        return deltaEnabled
-            && Array.isArray(capabilities?.downlinkModes)
+        return Array.isArray(capabilities?.downlinkModes)
             && capabilities.downlinkModes.includes('delta-v1')
             && typeof meta?.cursor === 'string'
             && meta.cursor !== '';
