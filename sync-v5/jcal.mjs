@@ -257,7 +257,9 @@ export class JcalDocument {
       || property(component, 'recurrence-id') === null);
     for (const component of kept) if (CONTENT.has(component[0])) removeProperty(component, 'rrule');
     next[2] = kept;
-    const component = next[2].find((part) => CONTENT.has(part[0]));
+    // Always re-stamp the surviving master, never an exception that shares its component name.
+    const component = next[2].find((part) => CONTENT.has(part[0])
+      && property(part, 'recurrence-id') === null);
     setProperty(component, 'dtstamp', 'date-time', utc(Date.now()));
     return new JcalDocument(next);
   }

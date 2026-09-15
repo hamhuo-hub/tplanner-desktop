@@ -24,9 +24,16 @@ Tasks use VTODO: `uid`, `summary`, `description`, optional `dtstart` and `due`, 
 `completed`, `rrule`, `rdate`, `exdate`, `recurrence-id`, `location` and `geo`. Do not use
 VEVENT's `dtend` in VTODO. Unscheduled tasks have no invented date. Date-only values stay
 date-only. Timed values are UTC with `Z`, or local values with explicit TZID and matching
-VTIMEZONE. Floating times and numeric UTC offsets are not emitted. Recurrence is a
+VTIMEZONE. Floating times and numeric UTC offsets are not emitted. A TZID must be a resolvable
+IANA zone name; validators resolve it rather than requiring the VTIMEZONE component to be
+present, because TPlanner's own writers emit UTC. Recurrence is a
 standard rule plus exceptions, not a set of separately synchronized generated Tasks.
 Editors may offer a subset of recurrence rules; unsupported rules must remain intact.
+
+Recurring tasks keep one master component per rule. A single instance's state (for example
+"this occurrence is done") is a second component with the same UID and kind carrying
+`recurrence-id`, never a separately generated record; a cancelled instance is an `exdate`
+on the master. Readers expand occurrences locally and must not persist the expansion.
 
 Notes use VJOURNAL with `dtstart` of type `date` and `description`; the daily note UID is
 `journal:YYYY-MM-DD`. They travel through the same record/command pipeline.
@@ -80,10 +87,13 @@ increments it, including deletion. Records are sorted by UID for stable snapshot
 
 The empty calendar above is a shape illustration, not a valid application record.
 `commandId` and device `sequence` are stable across retries. Device sequences start at 1
-and must be contiguous. A duplicate identical command returns the original receipt;
-reusing an identity with different bytes/content is an error. Gaps return HTTP 409 with
-`{"code":"SEQUENCE_GAP","expectedSequence":n}` without accepting later commands.
-Validate the whole batch's envelope/identity/sequence before any writes. Semantic document
+and must be contiguous. A new command sits exactly at the device's expected sequence; a
+command below that value is a replay and is answered from its stored receipt when
+`commandId`, `deviceId`, `sequence` and content fingerprint all match, so retrying an
+already-committed batch returns the original receipts without writing anything. Reusing an
+identity with different bytes/content is an error. Gaps return HTTP 409 with
+`{"code":"SEQUENCE_GAP","expectedSequence":n}` without accepting later commands. Validate
+the whole batch's envelope/identity/sequence before any writes. Semantic document
 errors consume that command's sequence and return a permanent rejected receipt so the
 queue cannot remain blocked behind poison data.
 
@@ -91,6 +101,10 @@ queue cannot remain blocked behind poison data.
 A stale put/delete returns a conflict, never silently overwrites a newer document.
 Recreating a deleted UID requires that tombstone's current revision. A delete of a
 nonexistent record with base 0 creates a tombstone, preventing delayed creates reviving it.
+A server never clears a device's accepted sequences. A client that must abandon its
+sequence space — after a changed server, or after a genuine gap — therefore mints a NEW
+`deviceId` and restarts at 1; rewinding an existing device identity is never valid
+recovery, because the server cannot tell a rewind from a duplicate.
 Receipts are committed in the same transaction as all accepted mutations:
 
 ```json
@@ -116,10 +130,14 @@ in-flight save may advance its base only from that save's own applied receipt. N
 blindly rebase an edit after another device wins. Keep conflicts/rejections and their
 local calendar document visible with explicit discard/reapply actions.
 
-Install snapshots atomically. Do not clear an applied pending command until a snapshot
-with revision at least its applied receipt revision has been installed. Older or different
+Install snapshots atomically. Do not clear an applied pending command until the installed
+state covers its receipt. A receipt's own revision is the value that matters: a batch's
+top-level `revision` is the global revision and may exceed the revision of the individual
+record a receipt refers to, so a command is releasable once either the installed snapshot
+revision is at least the receipt revision, or the mirror already holds that record at a
+revision at least as new. Older or different
 serverId snapshots must not overwrite current state silently; a changed server requires
-an explicit reset/reconnect choice. Local edits must survive process restart and transport
+an explicit reset/reconnect choice of its own. Local edits must survive process restart and transport
 failure. UI state reads the mirror overlaid with still-pending local documents.
 
 ## Watch and platform adapters
@@ -129,6 +147,13 @@ schedule/task wire models. The Watch has its own durable device identity and seq
 The phone is a relay: it must not rewrite Watch identities or claim central acceptance
 before the server commits. Data Layer and RFCOMM carry the same bytes and use the same
 idempotency rules. Watchface positions and list entries are transient reads of jCal.
+
+Every snapshot is the complete live set, so it declares its own scope: absence from a
+snapshot means the record is not there, and an actual deletion always arrives as a
+tombstone. A client must never accept a partial set as if it were complete — nothing may
+filter, cap, truncate or pre-project the records a peer receives. Each device keeps its own
+cursor, pending queue and local display state; sharing the same canonical content does not
+mean sharing runtime state.
 
 System Calendar is a one-way, retryable side effect after canonical local state is saved.
 Android uses a dedicated app-owned local calendar and CalendarContract. Only scheduled
