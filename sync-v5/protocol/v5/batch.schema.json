@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tplanner.app/sync-v5/batch.schema.json",
+  "title": "Sync V5 command batch",
+  "description": "POST /tplanner/v5/batch. At most 100 commands; device sequences are contiguous, start at 1 and are stable across retries.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocolVersion", "deviceId", "commands"],
+  "properties": {
+    "protocolVersion": { "const": 5 },
+    "deviceId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "oneOf": [
+          {
+            "title": "put",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["commandId", "sequence", "operation", "baseRevision", "calendar"],
+            "properties": {
+              "commandId": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+              "operation": { "const": "put" },
+              "baseRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+              "calendar": {
+                "type": "array",
+                "description": "RFC 7265 VCALENDAR: [\"vcalendar\", properties, components].",
+                "minItems": 3,
+                "maxItems": 3
+              }
+            }
+          },
+          {
+            "title": "delete",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["commandId", "sequence", "operation", "baseRevision", "uid"],
+            "properties": {
+              "commandId": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+              "operation": { "const": "delete" },
+              "baseRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+              "uid": { "type": "string", "minLength": 1, "maxLength": 1024 }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

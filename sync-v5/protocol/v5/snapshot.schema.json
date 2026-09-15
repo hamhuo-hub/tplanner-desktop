@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tplanner.app/sync-v5/snapshot.schema.json",
+  "title": "Sync V5 snapshot",
+  "description": "GET /tplanner/v5/snapshot. Full logical state; records are sorted by UID.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocolVersion", "serverId", "revision", "records"],
+  "properties": {
+    "protocolVersion": { "const": 5 },
+    "serverId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "records": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "title": "live record",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["revision", "deleted", "calendar"],
+            "properties": {
+              "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+              "deleted": { "const": false },
+              "calendar": {
+                "type": "array",
+                "description": "RFC 7265 VCALENDAR: [\"vcalendar\", properties, components].",
+                "minItems": 3,
+                "maxItems": 3
+              }
+            }
+          },
+          {
+            "title": "tombstone",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["revision", "deleted", "uid"],
+            "properties": {
+              "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+              "deleted": { "const": true },
+              "uid": { "type": "string", "minLength": 1, "maxLength": 1024 }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
