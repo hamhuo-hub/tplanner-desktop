@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { toZonedTime } from 'date-fns-tz';
-import { buildRecurringEdit, recurrenceOf, scheduleFromEditor } from '../domain/recurringTasks.mjs';
-import { seriesIdOf } from '../domain/recurringTaskSelection.mjs';
+import { fromZonedTime, formatInTimeZone } from 'date-fns-tz';
+import { format } from 'date-fns';
 import { useTranslation } from 'react-i18next';
-import { MAX_LENGTH_TITLE, EVENT_TYPES, TIMEZONES } from '../utils/constants';
+import { MAX_LENGTH_TITLE, TIMEZONES } from '../utils/constants';
 import { categoryTokens } from '../design-system';
+import { createTask } from '../syncV5/document.js';
 
 import {
     Dialog,
@@ -28,11 +28,38 @@ import { TimePicker } from '@mui/x-date-pickers/TimePicker';
 import { PlusCircle, MinusCircle, Check } from 'lucide-react';
 import NoteEditor from './NoteEditor';
 
+/**
+ * Create/edit ONE canonical VTODO document.
+ *
+ * There is deliberately no event/task/status type chooser: every record this editor writes
+ * is a task. Recurrence is a single RRULE on the same document, and a record with no
+ * schedule stays unscheduled instead of receiving an invented date.
+ */
+/** Wall clock in `zone` -> UTC instant to persist. */
+function wallClockToInstant(wallClock, zone) {
+    if (!wallClock) return Number.NaN;
+    if (!zone) return wallClock.getTime();
+    return fromZonedTime(format(wallClock, "yyyy-MM-dd'T'HH:mm:ss"), zone).getTime();
+}
+
+/** YYYY-MM-DD day key of a wall clock in `zone`, for DATE (date-only) values. */
+function formatDateInZone(wallClock, zone) {
+    return zone ? formatInTimeZone(wallClock, zone, 'yyyy-MM-dd') : format(wallClock, 'yyyy-MM-dd');
+}
+
+/** The editor's RRULE subset; an unsupported existing rule is preserved untouched. */
+function ruleFrom(frequency, count) {
+    if (!frequency || frequency === 'none') return null;
+    const rule = { freq: frequency.toUpperCase() };
+    if (count > 0) rule.count = count;
+    return rule;
+}
+
 export default function AddEventModal({ isOpen, onClose, onSave, defaultDate, initialEvent, events = [] }) {
     const { t } = useTranslation();
+    void events;
 
     const [title, setTitle] = useState('');
-    const [type, setType] = useState(EVENT_TYPES.EVENT);
     const [startDate, setStartDate] = useState(null);
     const [endDate, setEndDate] = useState(null);
     const [eventTimezone, setEventTimezone] = useState(''); // Empty string means local time
@@ -40,122 +67,110 @@ export default function AddEventModal({ isOpen, onClose, onSave, defaultDate, in
     const [checklist, setChecklist] = useState([]);
     const [colorId, setColorId] = useState(0);
 
-    // Recurrence State
-    const [recurrenceType, setRecurrenceType] = useState('none'); // 'none', 'daily', 'weekly', 'monthly'
-    const [recurrenceCount, setRecurrenceCount] = useState(1);
+    // Recurrence state. The editor offers a subset of RRULE; anything else stays intact.
+    const [recurrenceType, setRecurrenceType] = useState('none');
+    const [recurrenceCount, setRecurrenceCount] = useState(0);
+    const [scheduled, setScheduled] = useState(true);
 
     const [allDay, setAllDay] = useState(false);
     const [scheduleDirty, setScheduleDirty] = useState(false);
     const [saving, setSaving] = useState(false);
     const [saveError, setSaveError] = useState('');
-    const [draftId, setDraftId] = useState('');
-    const [recurrenceDirty, setRecurrenceDirty] = useState(false);
     const editSessionRef = useRef(0);
-    const creationBaselineRef = useRef(null);
 
     useEffect(() => {
         editSessionRef.current += 1;
         if (!isOpen) return;
         setSaving(false);
-        creationBaselineRef.current = null;
         setScheduleDirty(false);
-        setRecurrenceDirty(false);
         setSaveError('');
-        setDraftId(initialEvent?.id || crypto.randomUUID());
-        if (isOpen) {
-            if (initialEvent) {
-                // Edit Mode
-                const evType = initialEvent.type || EVENT_TYPES.EVENT;
-                setTitle(initialEvent.title);
-                setType(evType);
-                const zone = initialEvent.timezone || recurrenceOf(initialEvent)?.timeZone || '';
-                const displayedStart = zone ? toZonedTime(initialEvent.start, zone) : new Date(initialEvent.start);
-                const displayedEnd = zone ? toZonedTime(initialEvent.end, zone) : new Date(initialEvent.end);
-                setStartDate(displayedStart);
-                setEndDate(displayedEnd);
-                setEventTimezone(zone);
-                setNote(initialEvent.note || '');
-                setChecklist(initialEvent.checklist || []);
-                setColorId(initialEvent.colorId);
+        const savedZone = localStorage.getItem('tplanner_travel_timezone') || 'Asia/Shanghai';
+        setEventTimezone(savedZone);
 
-                // Detect all-day: 00:00 start and 23:59 end, only for status/task
-                const isAllDay = evType !== EVENT_TYPES.EVENT
-                    && displayedStart.getHours() === 0
-                    && displayedStart.getMinutes() === 0
-                    && displayedEnd.getHours() === 23
-                    && displayedEnd.getMinutes() >= 59;
-                setAllDay(isAllDay);
-
-                // Edit recurrence
-                setRecurrenceType(recurrenceOf(initialEvent)?.frequency || 'none');
-                setRecurrenceCount(recurrenceOf(initialEvent)?.count || 1);
-            } else {
-                // Create Mode
-                const now = defaultDate || new Date();
-                let start = new Date(now);
-                if (!defaultDate) {
-                    start.setMinutes(0, 0, 0);
-                    start.setHours(start.getHours() + 1);
-                }
-
-                const end = new Date(start.getTime() + 60 * 60 * 1000);
-
-                setTitle('');
-                setType(EVENT_TYPES.EVENT);
-                setStartDate(start);
-                setEndDate(end);
-                setAllDay(false);
-
-                const savedTravelTz = localStorage.getItem('tplanner_travel_timezone');
-                setEventTimezone(savedTravelTz || 'Asia/Shanghai');
-
-                setNote('');
-                setChecklist([]);
-                setColorId(0);
-
-                setRecurrenceType('none');
-                setRecurrenceCount(1);
-            }
+        if (initialEvent) {
+            // Edit mode: everything comes from the canonical row/document.
+            const hasSchedule = initialEvent.start !== null && initialEvent.start !== undefined;
+            const dateOnly = hasSchedule && initialEvent.document?.date !== null && initialEvent.document?.date !== undefined;
+            const zone = initialEvent.timeZone || savedZone;
+            setTitle(initialEvent.title || '');
+            setScheduled(hasSchedule);
+            setAllDay(dateOnly);
+            setStartDate(hasSchedule
+                ? (dateOnly ? new Date(`${initialEvent.document.date}T00:00:00`) : new Date(initialEvent.start))
+                : null);
+            setEndDate(initialEvent.due !== null && initialEvent.due !== undefined ? new Date(initialEvent.due) : null);
+            setNote(initialEvent.note || '');
+            setChecklist(initialEvent.checklist || []);
+            setColorId(initialEvent.colorId ?? 0);
+            const rule = initialEvent.recurrence;
+            setRecurrenceType(rule ? String(rule.freq || 'none').toLowerCase() : 'none');
+            setRecurrenceCount(Number(rule?.count ?? 0) || 0);
+            return;
         }
+
+        // Create mode: an unscheduled task unless the caller pointed at a specific instant.
+        const now = defaultDate || new Date();
+        const start = new Date(now);
+        if (!defaultDate) {
+            start.setMinutes(0, 0, 0);
+            start.setHours(start.getHours() + 1);
+        }
+        setTitle('');
+        setScheduled(Boolean(defaultDate));
+        setStartDate(start);
+        setEndDate(new Date(start.getTime() + 60 * 60 * 1000));
+        setAllDay(false);
+        setNote('');
+        setChecklist([]);
+        setColorId(0);
+        setRecurrenceType('none');
+        setRecurrenceCount(0);
     }, [isOpen, defaultDate, initialEvent]);
 
     const handleSave = async () => {
-        if (saving || !title.trim() || !startDate || !endDate) return;
+        if (saving || !title.trim()) return;
         const session = editSessionRef.current;
         setSaving(true);
         setSaveError('');
         try {
-            const schedule = scheduleFromEditor({
-                start: startDate, end: endDate, timeZone: eventTimezone,
-                allDay, original: initialEvent, dirty: scheduleDirty,
-            });
-            if (!Number.isFinite(+schedule.start) || !Number.isFinite(+schedule.end) || schedule.end < schedule.start) {
-                throw new Error(t('event.invalidDates', '结束时间不能早于开始时间'));
+            let document = initialEvent ? initialEvent.document : createTask({ title });
+            document = document.withTitle(title.trim());
+            document = document.withDescription(note);
+            document = document.withColorId(colorId);
+            document = document.withChecklist((checklist || []).filter(item => String(item.text || '').trim() !== ''));
+
+            if (!scheduled) {
+                // No invented date: a record with no time simply has no DTSTART/DUE, and a
+                // repeating record cannot be anchored without one.
+                document = document.withSchedule(null, null);
+                document = document.withRecurrence(null);
+            } else {
+                if (!startDate || !endDate) throw new Error(t('event.invalidDates', '请选择开始和结束时间'));
+                if (allDay) {
+                    const day = `${formatDateInZone(startDate, eventTimezone)}`;
+                    document = document.withDate(day);
+                    if (scheduleDirty) document = document.withRecurrence(null);
+                    const rule = allDay ? ruleFrom(recurrenceType, recurrenceCount) : null;
+                    if (rule) document = document.withRecurrence(rule);
+                } else {
+                    const startMs = wallClockToInstant(startDate, eventTimezone);
+                    let endMs = wallClockToInstant(endDate, eventTimezone);
+                    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+                        throw new Error(t('event.invalidDates', '结束时间不能早于开始时间'));
+                    }
+                    if (endMs <= startMs) endMs = startMs + 60 * 60 * 1000;
+                    document = document.withSchedule(startMs, endMs);
+                    const rule = ruleFrom(recurrenceType, recurrenceCount);
+                    document = document.withRecurrence(rule);
+                }
             }
-            const draft = {
-                ...initialEvent, id: draftId, title: title.trim(), type,
-                ...schedule, timezone: eventTimezone,
-                note, checklist: type === EVENT_TYPES.TASK ? checklist : [],
-                completed: initialEvent?.completed ?? false, colorId,
-                recurrenceType: type === EVENT_TYPES.TASK ? recurrenceType : 'none',
-                recurrenceCount: Math.max(1, Math.min(50, recurrenceCount)),
-            };
-            const snapshot = initialEvent || (events.some(event => event.id === draftId) ? creationBaselineRef.current : null);
-            const updates = buildRecurringEdit(events, snapshot, draft, Date.now(), { recurrenceChanged: recurrenceDirty });
-            creationBaselineRef.current ??= draft;
-            await onSave(updates);
+
+            await onSave(document);
             if (session === editSessionRef.current) onClose();
         } catch (error) {
             if (session === editSessionRef.current) setSaveError(error?.message || t('messages.saveError', '保存失败，请重试'));
         } finally {
             if (session === editSessionRef.current) setSaving(false);
-        }
-    };
-
-    const handleTypeChange = (_, newType) => {
-        if (newType !== null) {
-            setType(newType);
-            if (newType === EVENT_TYPES.EVENT) setAllDay(false);
         }
     };
 
@@ -171,36 +186,24 @@ export default function AddEventModal({ isOpen, onClose, onSave, defaultDate, in
                 <DialogContent component="fieldset" disabled={saving} sx={{ border: 0, minWidth: 0, m: 0 }}>
                     <Stack spacing={3} sx={{ mt: 1 }}>
                         {saveError && <Alert severity="error">{saveError}</Alert>}
-                        {seriesIdOf(initialEvent) && <Alert severity="info">
-                            {t('recurrence.seriesEditHint', '标题、备注、分类和子项内容会更新整个系列；每次完成进度保持独立。修改排程会更新未完成次数，减少次数或取消重复会保留已完成历史。')}
-                        </Alert>}
-                        {initialEvent && recurrenceOf(initialEvent) && !seriesIdOf(initialEvent) && <Alert severity="info">
-                            {t('recurrence.legacyUnbound', '这条旧重复任务没有可验证的系列关联。普通编辑只修改此次；重新选择重复规则可从此次建立系列。')}
-                        </Alert>}
-                        {recurrenceType !== 'none' && !['daily', 'weekly', 'monthly'].includes(recurrenceType) && <Alert severity="info">
+                        {initialEvent && recurrenceType !== 'none' && !['daily', 'weekly', 'monthly'].includes(recurrenceType) && <Alert severity="info">
                             {t('recurrence.unsupportedRule', '此任务使用较新版本的重复规则。普通编辑会保留原规则；可选择不重复或其他规则来更改。')}
                         </Alert>}
-                        {/* Type Toggle */}
-                        <ToggleButtonGroup
-                            value={type}
-                            exclusive
-                            onChange={handleTypeChange}
-                            aria-label="event type"
-                            fullWidth
-                        >
-                            <ToggleButton value={EVENT_TYPES.EVENT}>
-                                {t('event.typeReminder', 'Reminder')}
-                            </ToggleButton>
-                            <ToggleButton value={EVENT_TYPES.STATUS}>
-                                {t('event.typeStatus', 'Status')}
-                            </ToggleButton>
-                            <ToggleButton value={EVENT_TYPES.TASK}>
-                                {t('event.typeTask', 'Task')}
-                            </ToggleButton>
-                        </ToggleButtonGroup>
 
-                        {/* Recurrence Options — tasks only */}
-                        {type === EVENT_TYPES.TASK && (
+                        {/* Scheduling: an absent time stays absent */}
+                        <Box>
+                            <FormControlLabel
+                                control={<Switch checked={scheduled} onChange={(event) => { setScheduleDirty(true); setScheduled(event.target.checked); }} size="small" />}
+                                label={<Typography variant="body2" color="text.secondary">{t('event.scheduled')}</Typography>}
+                            />
+                            {!scheduled && (
+                                <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                    {t('event.noTimeHint')}
+                                </Typography>
+                            )}
+                        </Box>
+
+                        {scheduled && (
                         <Box sx={{ border: '1px solid', borderColor: 'divider', p: 1, borderRadius: 'var(--tp-semantic-radius-control)' }}>
                             <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }} justifyContent="space-between">
                                 <Typography variant="body2" color="text.secondary">
@@ -209,7 +212,7 @@ export default function AddEventModal({ isOpen, onClose, onSave, defaultDate, in
                                 <ToggleButtonGroup
                                     value={recurrenceType}
                                     exclusive
-                                    onChange={(e, val) => { if (val === null) return; setRecurrenceDirty(true); setRecurrenceType(val); if (val !== 'none' && recurrenceCount < 2) setRecurrenceCount(2); }}
+                                    onChange={(e, val) => { if (val === null) return; setScheduleDirty(true); setRecurrenceType(val); if (val !== 'none' && recurrenceCount < 1) setRecurrenceCount(0); }}
                                     size="small"
                                 >
                                     <ToggleButton value="none">{t('recurrence.none')}</ToggleButton>
@@ -222,19 +225,21 @@ export default function AddEventModal({ isOpen, onClose, onSave, defaultDate, in
                                 <Stack direction="row" spacing={2} sx={{ mt: 2 }} alignItems="center">
                                     <TextField
                                         label={t('recurrence.count')}
-                                        disabled={!['daily', 'weekly', 'monthly'].includes(recurrenceType)}
                                         type="number"
                                         size="small"
                                         value={recurrenceCount}
-                                        onChange={(e) => { setRecurrenceDirty(true); setRecurrenceCount(Math.max(1, Math.min(50, parseInt(e.target.value) || 1))); }}
-                                        inputProps={{ min: 1, max: 50 }}
-                                        sx={{ width: 100 }}
+                                        onChange={(e) => setRecurrenceCount(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                                        inputProps={{ min: 0, max: 365 }}
+                                        sx={{ width: 120 }}
                                     />
                                     <Typography variant="caption" color="text.secondary">
-                                        {t('recurrence.max')}
+                                        {t('recurrence.countHint')}
                                     </Typography>
                                 </Stack>
                             )}
+                            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                                {t('recurrence.unsupportedPreserved')}
+                            </Typography>
                         </Box>
                         )}
 
@@ -250,24 +255,17 @@ export default function AddEventModal({ isOpen, onClose, onSave, defaultDate, in
                         />
 
                         {/* Date & Time Pickers */}
+                        {scheduled && (
                         <Stack spacing={2}>
-                            {/* All-day toggle — only for Status and Task */}
-                            {type !== EVENT_TYPES.EVENT && (
+                            {/* Date-only toggle: DATE values stay date-only */}
+                            {(
                                 <FormControlLabel
                                     control={
                                         <Switch
                                             checked={allDay}
                                             onChange={(e) => {
-                                                const next = e.target.checked;
                                                 setScheduleDirty(true);
-                                                setAllDay(next);
-                                                // When switching to all-day, snap end date to match start date
-                                                if (next && startDate && endDate) {
-                                                    const snapped = new Date(startDate);
-                                                    snapped.setHours(23, 59, 59, 999);
-                                                    // Keep end date but ensure it's same day or later
-                                                    if (endDate < startDate) setEndDate(snapped);
-                                                }
+                                                setAllDay(e.target.checked);
                                             }}
                                             size="small"
                                         />
@@ -352,6 +350,7 @@ export default function AddEventModal({ isOpen, onClose, onSave, defaultDate, in
                                 ))}
                             </TextField>
                         </Stack>
+                        )}
 
                         {/* Note */}
                         <Box>
@@ -363,8 +362,8 @@ export default function AddEventModal({ isOpen, onClose, onSave, defaultDate, in
                             <NoteEditor value={note} onChange={setNote} />
                         </Box>
 
-                        {/* Checklist - Only for Task Type */}
-                        {type === EVENT_TYPES.TASK && (
+                        {/* Checklist: one x-tplanner-checklist TEXT property on this record */}
+                        {(
                             <Box>
                                 <Typography variant="body2" color="text.secondary" gutterBottom>
                                     {t('event.checklist', 'Checklist')}

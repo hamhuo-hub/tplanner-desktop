@@ -1,6 +1,6 @@
 import { lightTokens } from '../design-assets/tokens/generated/tplanner-light.mjs';
 
-const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, nativeImage, shell, dialog, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, dialog, screen } = require('electron');
 const path  = require('path');
 const fs    = require('fs');
 
@@ -13,8 +13,6 @@ const DEFAULT_STATE = { width: 1280, height: 800, x: undefined, y: undefined, ma
 
 // Widget state lives in its own file so changes don't churn STATE_FILE.
 const WIDGET_STATE_FILE  = path.join(app.getPath('userData'), 'widget-state.json');
-const JOURNALS_FILE      = path.join(app.getPath('userData'), 'journals.json');
-const REMINDER_LEAD_MIN = 30; // minutes before event start to fire reminder
 const APP_USER_MODEL_ID = 'com.tplanner.app';
 
 // ── Linux autostart helpers ────────────────────────────────────────────────
@@ -78,12 +76,16 @@ function saveNotesState(patch) {
     const current = loadNotesState();
     writeAsync(NOTES_STATE_FILE, JSON.stringify({ ...current, ...patch }));
 }
-/** Hydrated event objects: { id, title, start: Date, end: Date, type, ... } */
-let eventsCache = [];
-/** Active setTimeout handles, keyed by `${eventId}:start` / `${eventId}:lead`. */
-const reminderTimers = new Map();
-/** Avoid double-firing on the same event after process restart. */
-const firedReminders = new Set();
+/**
+ * Read-only projection of the renderer's canonical V5 store.
+ *
+ * Main is a shell: it renders the widget window and the tray, and forwards widget
+ * interactions back to the renderer as intents. It deliberately owns NO task model, no
+ * event cache and no notification scheduler — the client's single source of truth is the
+ * jCal document in the renderer's IndexedDB store.
+ */
+let taskProjection = [];
+let noteProjection = { dayKey: null, text: '' };
 
 // ── Window State ───────────────────────────────────────────────────────────
 function loadWindowState() {
@@ -263,8 +265,8 @@ function createWidgetWindow() {
 
     widgetWindow.once('ready-to-show', () => {
         widgetWindow.show();
-        // Kick off initial render with whatever cache we have.
-        widgetWindow.webContents.send('widget:events', serializeEvents(eventsCache));
+        // Kick off initial render with the latest projection the renderer pushed.
+        widgetWindow.webContents.send('widget:events', taskProjection);
     });
 
     const persistBounds = () => {
@@ -331,7 +333,10 @@ function createNotesWindow() {
 
     notesWindow.loadFile(path.join(__dirname, 'notes-widget.html'));
 
-    notesWindow.once('ready-to-show', () => { notesWindow.show(); });
+    notesWindow.once('ready-to-show', () => {
+        notesWindow.show();
+        notesWindow.webContents.send('note:updated', noteProjection);
+    });
 
     const persistBounds = () => {
         if (!notesWindow || notesWindow.isDestroyed()) return;
@@ -351,114 +356,6 @@ function createNotesWindow() {
     notesWindow.on('closed', () => { notesWindow = null; });
 
     rebuildTrayMenu();
-}
-
-// ── Events cache + reminder scheduling ─────────────────────────────────────
-function hydrateEvents(arr) {
-    const out = [];
-    for (const e of arr) {
-        if (!e || !e.id || !e.start || !e.end) continue;
-        out.push({
-            ...e,
-            start: new Date(e.start),
-            end: new Date(e.end),
-        });
-    }
-    return out;
-}
-
-function serializeEvents(arr) {
-    return arr.map(e => ({
-        ...e,
-        start: e.start instanceof Date ? e.start.toISOString() : e.start,
-        end:   e.end   instanceof Date ? e.end.toISOString()   : e.end,
-    }));
-}
-
-function isToday(d) {
-    const now = new Date();
-    return d.getFullYear() === now.getFullYear()
-        && d.getMonth() === now.getMonth()
-        && d.getDate() === now.getDate();
-}
-
-function getTodayEvents() {
-    return liveEvents().filter(e => isToday(e.start) || isToday(e.end)
-        || (e.start.getTime() <= Date.now() && e.end.getTime() >= Date.now()));
-}
-
-function clearAllReminders() {
-    for (const t of reminderTimers.values()) clearTimeout(t);
-    reminderTimers.clear();
-}
-
-function scheduleReminder(eventId, fireAt, label, kind) {
-    const key = eventId + ':' + kind;
-    if (reminderTimers.has(key)) clearTimeout(reminderTimers.get(key));
-    const delay = fireAt - Date.now();
-    if (delay <= 0) return; // already past
-    if (delay > 24 * 60 * 60 * 1000) return; // we re-schedule daily; ignore far-future
-    if (firedReminders.has(key)) return;
-    const handle = setTimeout(() => {
-        firedReminders.add(key);
-        reminderTimers.delete(key);
-        fireReminderNotification(eventId, label, kind);
-    }, delay);
-    reminderTimers.set(key, handle);
-}
-
-function rescheduleReminders() {
-    clearAllReminders();
-    for (const e of getTodayEvents()) {
-        // Status events are background bands, not actionable — skip.
-        if (e.type === 'status') continue;
-        // Lead reminder (5 min before)
-        const startTs = e.start.getTime();
-        scheduleReminder(e.id, startTs - REMINDER_LEAD_MIN * 60 * 1000, e.title || '事件',
-                         'lead');
-        // Start reminder
-        scheduleReminder(e.id, startTs, e.title || '事件', 'start');
-    }
-}
-
-function fireReminderNotification(eventId, title, kind) {
-    if (!Notification.isSupported()) return;
-    const event = eventsCache.find(e => e.id === eventId);
-    if (!event) return;
-    const startStr = formatTime(event.start);
-    const endStr   = formatTime(event.end);
-    const body = kind === 'lead'
-        ? `${REMINDER_LEAD_MIN} 分钟后开始 · ${startStr} – ${endStr}`
-        : `开始了 · ${startStr} – ${endStr}`;
-
-    const n = new Notification({
-        title: `tPlanner · ${title}`,
-        body,
-        icon: getIconPath(),
-        silent: false,
-    });
-    n.on('click', () => {
-        if (mainWindow) {
-            if (mainWindow.isMinimized()) mainWindow.restore();
-            mainWindow.show();
-            mainWindow.focus();
-        }
-    });
-    n.show();
-}
-
-function pad2(n) { return n < 10 ? '0' + n : '' + n; }
-function formatTime(d) { return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
-
-// Only live events reach the widget — tombstones stay internal
-function liveEvents() {
-    return eventsCache.filter(e => !e.deletedAt);
-}
-
-function broadcastEventsToWidget() {
-    if (widgetWindow && !widgetWindow.isDestroyed()) {
-        widgetWindow.webContents.send('widget:events', serializeEvents(liveEvents()));
-    }
 }
 
 // ── Icon ───────────────────────────────────────────────────────────────────
@@ -511,7 +408,17 @@ function rebuildTrayMenu() {
             },
         },
         {
-            label: notesOpen ? '隐藏随手记' : '显示随手记',
+            label: '今日随笔',
+            click: () => {
+                if (mainWindow) {
+                    if (mainWindow.isMinimized()) mainWindow.restore();
+                    mainWindow.show();
+                    mainWindow.focus();
+                }
+            },
+        },
+        {
+            label: notesOpen ? '隐藏随笔便签' : '显示随笔便签',
             click: () => {
                 if (notesOpen) {
                     notesWindow.hide();
@@ -720,28 +627,21 @@ function setupMaximizeListeners() {
     mainWindow?.on('unmaximize', () => mainWindow?.webContents.send('window:maximized', false));
 }
 
-// ── IPC Handlers — Widget / Events Sync ───────────────────────────────────
+// ── IPC Handlers — Widget / Task projection ───────────────────────────────
 /**
- * Renderer (main app) calls this whenever its event list changes. Main
- * stores the events, persists them, broadcasts to the widget, and
- * recomputes today's reminders.
+ * The renderer owns the canonical store and pushes its projection here. Main keeps it in
+ * memory only to serve the widget window; nothing is persisted or re-modelled.
  */
-// Debounce: 快速连续操作（删除、批量更新）只触发一次写盘
-let syncDebounceTimer = null;
-ipcMain.on('events:sync', (_e, raw) => {
-    if (!Array.isArray(raw)) return;
-    eventsCache = hydrateEvents(raw);
-    broadcastEventsToWidget();
-
-    clearTimeout(syncDebounceTimer);
-    syncDebounceTimer = setTimeout(() => {
-        firedReminders.clear();
-        rescheduleReminders();
-    }, 300);
+ipcMain.on('tasks:projection', (_e, rows) => {
+    if (!Array.isArray(rows)) return;
+    taskProjection = rows;
+    if (widgetWindow && !widgetWindow.isDestroyed()) {
+        widgetWindow.webContents.send('widget:events', taskProjection);
+    }
 });
 
-/** Widget renderer pulls events on init or by user request. */
-ipcMain.handle('widget:getEvents', () => serializeEvents(liveEvents()));
+/** Widget renderer pulls the projection on init or by user request. */
+ipcMain.handle('widget:getEvents', () => taskProjection);
 
 ipcMain.on('widget:show', () => { createWidgetWindow(); rebuildTrayMenu(); });
 ipcMain.on('widget:hide', () => {
@@ -798,154 +698,57 @@ ipcMain.handle('notes:isAlwaysOnTop', () => {
     return notesWindow.isAlwaysOnTop();
 });
 
-/** Mark a task as completed from the widget. */
-ipcMain.on('widget:toggleTask', (_e, eventId) => {
-    const idx = eventsCache.findIndex(e => e.id === eventId);
-    if (idx < 0) return;
-    const ev = eventsCache[idx];
-    if (ev.type !== 'task') return;
-    ev.completed = !ev.completed;
-    ev.updatedAt = Date.now();
-    // eventsCache is in-memory only; RxDB in renderer is authoritative
+/**
+ * Widget interactions are INTENTS. Main never mutates a task: it forwards the request to
+ * the renderer, which writes the canonical jCal document through the V5 store and pushes
+ * an updated projection back.
+ */
+function sendTaskIntent(payload) {
     if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('events:remoteUpdate', { id: eventId, completed: ev.completed });
+        mainWindow.webContents.send('tasks:intent', payload);
     }
-    broadcastEventsToWidget();
+}
+
+ipcMain.on('widget:toggleTask', (_e, uid) => {
+    const row = taskProjection.find(item => item.uid === uid);
+    if (!row) return;
+    sendTaskIntent({ uid, completed: !row.completed });
 });
 
-ipcMain.on('widget:toggleSubtask', (_e, eventId, subtaskId) => {
-    const idx = eventsCache.findIndex(e => e.id === eventId);
-    if (idx < 0) return;
-    const ev = eventsCache[idx];
-    if (!Array.isArray(ev.checklist)) return;
-
-    const sub = ev.checklist.find(s => s.id === subtaskId);
-    if (!sub) return;
-    sub.completed = !sub.completed;
-
-    // Mirror the same auto-complete logic as EventDetailsModal
-    const allDone  = ev.checklist.every(s => s.completed);
-    const anyUndone = ev.checklist.some(s => !s.completed);
-    if (allDone)   ev.completed = true;
-    if (anyUndone) ev.completed = false;
-
-    ev.updatedAt = Date.now();
-    // eventsCache is in-memory only; RxDB in renderer is authoritative
-
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('events:remoteUpdate', {
-            id: eventId,
-            completed: ev.completed,
-            checklist: ev.checklist,
-        });
-    }
-    broadcastEventsToWidget();
-});
-
-// ── Journal (随笔) IPC ─────────────────────────────────────────────────────
-// 条目格式：{ text, updatedAt, deletedAt }（与 events 的 tombstone 模型一致）。
-// 旧版纯字符串格式在读取时迁移为 { text, updatedAt: 0, deletedAt: null }，
-// 时间戳 0 保证会被任何带时间戳的写入/删除覆盖 —— 这是修复"软删除时间戳失效
-// 导致回环恢复"问题的关键：删除必须携带比原内容更新的 updatedAt 才能在合并时获胜。
-function normalizeJournalEntry(value) {
-    if (value && typeof value === 'object') {
-        return { text: value.text || '', updatedAt: value.updatedAt || 0, deletedAt: value.deletedAt ?? null };
-    }
-    return { text: value || '', updatedAt: 0, deletedAt: null };
-}
-
-function normalizeJournals(map) {
-    const result = {};
-    for (const [date, value] of Object.entries(map || {})) {
-        result[date] = normalizeJournalEntry(value);
-    }
-    return result;
-}
-
-function loadJournals() {
-    try {
-        if (fs.existsSync(JOURNALS_FILE))
-            return normalizeJournals(JSON.parse(fs.readFileSync(JOURNALS_FILE, 'utf8')));
-    } catch (e) { /* ignore */ }
-    return {};
-}
-
-function saveJournals(data) {
-    writeAsync(JOURNALS_FILE, JSON.stringify(data));
-}
-
-ipcMain.handle('journal:getAll', () => loadJournals());
-
-ipcMain.on('journal:save', (_e, date, entry) => {
-    const data = loadJournals();
-    // 随手记 widget 传入的是裸字符串（非 {text,updatedAt,deletedAt} 对象）。
-    // normalizeJournalEntry 对裸字符串会归一化为 updatedAt:0（这是为了迁移磁盘上
-    // 的旧格式数据），如果直接复用会让 widget 的每次编辑都带着 updatedAt:0 落盘——
-    // 在 LWW 合并中永远输给任何带真实时间戳的版本，导致 widget 的修改"无法同步"
-    // （实际是写入时就已带着必输的时间戳，与同步逻辑无关）。因此裸字符串在这里
-    // 必须当作"新的本地编辑"处理，赋予真实的当前时间戳。
-    const ts = Date.now();
-    if (entry && typeof entry === 'object') {
-        data[date] = normalizeJournalEntry(entry);
-        // 由主窗口传入的完整对象已包含 version，无需修改
-    } else {
-        // 小部件的裸字符串：增量版本号
-        const text = entry || '';
-        const oldVer = (data[date] && data[date].version) || 0;
-        data[date] = text.trim()
-            ? { text, version: oldVer + 1, updatedAt: ts, deletedAt: null }
-            : { text: '', version: oldVer + 1, updatedAt: ts, deletedAt: ts };
-    }
-    saveJournals(data);
-    const sid = _e.sender.id;
-    BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed() && win.webContents.id !== sid)
-            win.webContents.send('journal:updated', date, data[date]);
+ipcMain.on('widget:toggleSubtask', (_e, uid, subtaskId) => {
+    const row = taskProjection.find(item => item.uid === uid);
+    if (!row || !Array.isArray(row.checklist)) return;
+    const checklist = row.checklist.map(item => (item.id === subtaskId ? { ...item, completed: !item.completed } : item));
+    const allDone = checklist.length > 0 && checklist.every(item => item.completed);
+    const anyUndone = checklist.some(item => !item.completed);
+    sendTaskIntent({
+        uid,
+        checklist,
+        completed: allDone ? true : anyUndone ? false : row.completed,
     });
 });
 
-// Batch replace for LAN sync — replaces all journals atomically
-ipcMain.on('journal:saveAll', (_e, merged) => {
-    if (!merged || typeof merged !== 'object') return;
-    const normalized = normalizeJournals(merged);
-    saveJournals(normalized);
-    const sid = _e.sender.id;
-    BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed() && win.webContents.id !== sid)
-            win.webContents.send('journal:allUpdated', normalized);
-    });
-});
+// ── Daily note (canonical VJOURNAL, owned by the renderer) ────────────────
+// Main holds only the text the renderer last pushed, so the notes widget can render it.
+// Saving routes back to the renderer, which writes the canonical document.
+ipcMain.handle('note:getCurrent', () => noteProjection);
 
-// ── Daily Checklist ────────────────────────────────────────────────────────
-const CHECKLISTS_FILE = path.join(app.getPath('userData'), 'daily-checklists.json');
-
-function loadChecklists() {
-    try {
-        if (fs.existsSync(CHECKLISTS_FILE))
-            return JSON.parse(fs.readFileSync(CHECKLISTS_FILE, 'utf8'));
-    } catch (e) { /* ignore */ }
-    return {};
-}
-
-function saveChecklists(data) {
-    writeAsync(CHECKLISTS_FILE, JSON.stringify(data));
-}
-
-ipcMain.handle('checklist:getAll', () => loadChecklists());
-
-ipcMain.on('checklist:save', (_e, date, items) => {
-    const data = loadChecklists();
-    if (Array.isArray(items) && items.length > 0) {
-        data[date] = items;
-    } else {
-        delete data[date];
-    }
-    saveChecklists(data);
+ipcMain.on('note:projection', (_e, payload) => {
+    if (!payload || typeof payload !== 'object') return;
+    noteProjection = { dayKey: payload.dayKey ?? null, text: payload.text ?? '' };
     const senderId = _e.sender.id;
     BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed() && win.webContents.id !== senderId)
-            win.webContents.send('checklist:updated', date, items);
+        if (!win.isDestroyed() && win.webContents.id !== senderId) {
+            win.webContents.send('note:updated', noteProjection);
+        }
     });
+});
+
+ipcMain.on('note:save', (_e, payload) => {
+    if (!payload || typeof payload.text !== 'string') return;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('note:intent', { dayKey: payload.dayKey ?? null, text: payload.text });
+    }
 });
 
 // ── Sync (client-side config only; sync target is the fixed Cloudflare Tunnel URL) ──
@@ -987,9 +790,6 @@ app.whenReady().then(() => {
     if (widgetState.visible) createWidgetWindow();
     const notesState = loadNotesState();
     if (notesState.visible) createNotesWindow();
-
-    // Re-evaluate reminders at midnight so tomorrow's schedule kicks in.
-    setInterval(rescheduleReminders, 5 * 60 * 1000);
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -1,5 +1,6 @@
 /* TPlanner application styles. All appearance values consume the light token package.
-   The compact timeline keeps its algorithm-coupled geometry; see docs/web-desktop-light.md. */
+   The compact timeline keeps its algorithm-coupled geometry; record facts come from the
+   canonical jCal document (see docs/sync-v5.md). */
 @import "tailwindcss";
 @import "./design-system/primitives.css";
 @import "./design-system/business.css";
@@ -97,6 +98,7 @@ html { font-size: 100%; }
 
 /* Allow text selection inside content areas */
 .timeline-scroll-area,
+.task-list-scroll,
 .modal-content,
 textarea,
 input[type="text"],

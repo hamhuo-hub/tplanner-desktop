@@ -2,7 +2,8 @@ import { useEffect, useRef } from 'react';
 import { Copy, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-export default function ContextMenu({ x, y, event, onClose, onCopy, onDelete }) {
+/** Context menu for one canonical task row. Actions only; it holds no task state. */
+export default function ContextMenu({ x, y, row, onClose, onCopy, onDelete }) {
     const { t } = useTranslation();
     const ref = useRef(null);
 
@@ -38,10 +39,10 @@ export default function ContextMenu({ x, y, event, onClose, onCopy, onDelete }) 
             }}
         >
             <div style={{ padding: '4px 10px 6px', fontSize: 'var(--tp-profile-meta-font-size)', color: 'var(--clr-text-dim)', letterSpacing: '0.08em', textTransform: 'uppercase', borderBottom: '1px solid var(--clr-border)' }}>
-                {event?.title}
+                {row?.title}
             </div>
-            <MenuItem icon={<Copy size={13} />} label={t('contextMenu.copy')} onClick={() => { onCopy(event); onClose(); }} />
-            <MenuItem icon={<Trash2 size={13} />} label={t('contextMenu.delete')} danger onClick={() => { onDelete(event); onClose(); }} />
+            <MenuItem icon={<Copy size={13} />} label={t('contextMenu.copy')} onClick={() => { onCopy(row); onClose(); }} />
+            <MenuItem icon={<Trash2 size={13} />} label={t('contextMenu.delete')} danger onClick={() => { onDelete(row); onClose(); }} />
         </div>
     );
 }

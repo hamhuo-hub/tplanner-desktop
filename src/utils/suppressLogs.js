@@ -7,13 +7,8 @@ const NOISE_PATTERNS = [
     // i18next 广告
     /i18next is made possible by our own product/,
     /locize\.com/,
-    // RxDB Dexie 存储广告
-    /RxDB Open Core RxStorage/,
-    /free Dexie\.js based RxStorage/,
-    /premium plugins/,
-    /setPremiumFlag/,
-    /rxdb\.info\/premium/,
-    /rxdb\.info\/rx-storage-dexie/,
+    // Dexie 免费版提示（V5 只用原生 Dexie，没有 RxDB 层）
+    /free Dexie\.js/,
     // aria-hidden 浏览器警告（来自 MUI Modal）
     /Blocked aria-hidden on an element/,
 ];

@@ -2,6 +2,12 @@ import { useTranslation } from 'react-i18next';
 import { fromZonedTime, formatInTimeZone } from 'date-fns-tz';
 import { event as eventTokens, categoryForId, semantic, TaskUnit } from '../design-system';
 
+/**
+ * One positioned block on the timeline.
+ *
+ * Renders a read-only jCal projection row; `event.due` is the honest deadline and
+ * `event.hasDue === false` means the record only has DTSTART.
+ */
 export default function EventBlock({ event, onClick, isConflicting, displayTimezone, onToggleTaskComplete, onDragStart, onContextMenu, isShadow, isSelected, style }) {
     const { t } = useTranslation();
     const tz = displayTimezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -24,7 +30,14 @@ export default function EventBlock({ event, onClick, isConflicting, displayTimez
     const widthPercent = (durationMins / 1440) * 100;
     const isCompleted  = event.completed === true;
     const category = categoryForId(event.colorId);
-    const timeLabel = `${formatInTimeZone(event.start, tz, 'HH:mm')} – ${formatInTimeZone(event.end, tz, 'HH:mm')}`;
+    // `end` equals `start` when the canonical record has no DUE, so the label must not print
+    // an invented range. A date-only record shows its day instead of a midnight clock.
+    const dateOnly = event.document?.date !== null && event.document?.date !== undefined;
+    const timeLabel = dateOnly
+        ? formatInTimeZone(event.start, tz, 'yyyy-MM-dd')
+        : (event.hasDue === false
+            ? formatInTimeZone(event.start, tz, 'HH:mm')
+            : `${formatInTimeZone(event.start, tz, 'HH:mm')} – ${formatInTimeZone(event.end, tz, 'HH:mm')}`);
 
     // User category owns the paired foreground/background; interaction state
     // independently owns completed, selection and conflict emphasis.

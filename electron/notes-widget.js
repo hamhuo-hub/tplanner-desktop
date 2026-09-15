@@ -1,23 +1,20 @@
 import { initializeWindowControls } from './widget-shared.mjs';
 
+/* tPlanner Daily Note widget — vanilla renderer.
+ *
+ * The note it shows IS the canonical VJOURNAL document: the renderer pushes
+ * { dayKey, text } and a save is only an INTENT. The widget never keeps a note store and
+ * never writes files; the main app owns the jCal document and the sync queue.
+ */
 (function () {
   'use strict';
 
+  function pad2(n) { return n < 10 ? '0' + n : '' + n; }
   function todayKey() {
     var d = new Date();
     return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
   }
-  function pad2(n) { return n < 10 ? '0' + n : '' + n; }
   function $(id) { return document.getElementById(id); }
-
-  // 主程序里 journals 已迁移为 { text, updatedAt, deletedAt } 对象格式，
-  // 但本组件只关心纯文本。直接把对象塞进 textContent 会被 DOM 强转成
-  // "[object Object]" 并连同新的 updatedAt 落盘，污染同步数据并在
-  // LWW 合并中永久覆盖其他设备的真实内容——必须在这里拆出 .text。
-  function entryText(entry) {
-    if (entry && typeof entry === 'object') return entry.text || '';
-    return entry || '';
-  }
 
   function showSaved() {
     var el = $('save-indicator');
@@ -54,24 +51,26 @@ import { initializeWindowControls } from './widget-shared.mjs';
     var api = window.notesAPI;
     var editor = $('notes-editor');
     var rawText = '';
+    var dayKey = todayKey();
     var operationStartText = '';
 
     if (!api) {
-      editor.textContent = '暂时无法加载随手记，请重新打开便签。';
+      editor.textContent = '暂时无法加载随笔，请重新打开便签。';
       editor.contentEditable = 'false';
       return;
     }
 
-    // Load today's text, show rendered immediately
-    api.getJournals().then(function (journals) {
-      rawText = entryText((journals || {})[todayKey()]);
+    // Today's canonical note text, if the renderer has published it yet.
+    api.getCurrentNote().then(function (payload) {
+      if (!payload || payload.dayKey !== dayKey) return;
+      rawText = payload.text || '';
       if (rawText) showRendered(editor, rawText);
     });
 
-    // External update (sync from main app)
-    api.onJournalUpdated(function (date, entry) {
-      if (date !== todayKey()) return;
-      rawText = entryText(entry);
+    // External update (edited in the main window, or a snapshot installed)
+    api.onNoteUpdated(function (payload) {
+      if (!payload || payload.dayKey !== dayKey) return;
+      rawText = payload.text || '';
       if (document.activeElement !== editor) {
         showRendered(editor, rawText);
       } else {
@@ -87,21 +86,20 @@ import { initializeWindowControls } from './widget-shared.mjs';
       }
     });
 
-    // Input only updates the in-memory draft. One focus→blur session is one operation;
-    // network sync is requested only after that operation has committed.
+    // Input only updates the in-memory draft. One focus→blur session is one operation, and
+    // only a changed session produces a save intent.
     // 用 innerText 而不是 textContent：contenteditable 里按回车会插入 <div>/<br>，
     // textContent 只拼接文本节点、吞掉这些块级换行，导致保存时丢失所有换行符。
-    // innerText 会按渲染结果（含 white-space: pre-wrap）把块级换行转成 \n。
     editor.addEventListener('input', function () {
       rawText = editor.innerText;
     });
 
-    // Blur commits exactly once, and unchanged focus sessions do not produce writes.
     editor.addEventListener('blur', function () {
       rawText = editor.innerText;
       showRendered(editor, rawText);
       if (rawText !== operationStartText) {
-        api.saveJournal(todayKey(), rawText);
+        // Intent only: the renderer persists the canonical VJOURNAL document.
+        api.saveNote({ dayKey: dayKey, text: rawText });
         showSaved();
       }
       operationStartText = rawText;

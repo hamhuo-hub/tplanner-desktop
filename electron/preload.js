@@ -59,23 +59,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
      */
     getZoom: () => ipcRenderer.invoke('app:getZoom'),
 
-    // ── Today-Widget Sync ─────────────────────────────────────────────────
+    // ── Today-Widget / Shell projection ───────────────────────────────────
     /**
-     * Push the current event list to main so it can drive the widget +
-     * notification scheduler. start/end can be either Date or ISO strings —
-     * main re-hydrates either way.
+     * Push a read-only projection of the canonical V5 store to the shell. Main keeps no
+     * task model of its own; `start`/`due` are epoch milliseconds (null when absent).
      */
-    syncEvents: (events) => ipcRenderer.send('events:sync', events),
+    syncTaskProjection: (rows) => ipcRenderer.send('tasks:projection', rows),
 
-    /**
-     * Subscribe to remote updates pushed back from main (e.g. the user
-     * ticked a task in the widget — main tells the React app to mirror
-     * the change in RxDB so both views stay consistent).
-     */
-    onEventsRemoteUpdate: (callback) => {
+    /** Widget interactions arrive as intents; the renderer persists them through the store. */
+    onTaskIntent: (callback) => {
         const handler = (_e, payload) => callback(payload);
-        ipcRenderer.on('events:remoteUpdate', handler);
-        return () => ipcRenderer.removeListener('events:remoteUpdate', handler);
+        ipcRenderer.on('tasks:intent', handler);
+        return () => ipcRenderer.removeListener('tasks:intent', handler);
     },
 
     /** Show / hide the today widget on demand. */
@@ -99,27 +94,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getLanConfig:  () => ipcRenderer.invoke('lan:getConfig'),
     saveLanConfig: (cfg) => ipcRenderer.send('lan:saveConfig', cfg),
 
-    // ── Daily Checklist ────────────────────────────────────────────────────
-    getChecklists:  () => ipcRenderer.invoke('checklist:getAll'),
-    saveChecklist:  (date, items) => ipcRenderer.send('checklist:save', date, items),
-    onChecklistUpdated: (callback) => {
-        const handler = (_e, date, items) => callback(date, items);
-        ipcRenderer.on('checklist:updated', handler);
-        return () => ipcRenderer.removeListener('checklist:updated', handler);
+    // ── Daily note (canonical VJOURNAL, persisted by the renderer) ─────────
+    getCurrentNote: () => ipcRenderer.invoke('note:getCurrent'),
+    publishNote: (payload) => ipcRenderer.send('note:projection', payload),
+    onNoteIntent: (callback) => {
+        const handler = (_e, payload) => callback(payload);
+        ipcRenderer.on('note:intent', handler);
+        return () => ipcRenderer.removeListener('note:intent', handler);
     },
-
-    // ── Journal (随笔) ─────────────────────────────────────────────────────
-    getJournals:    () => ipcRenderer.invoke('journal:getAll'),
-    saveJournal:    (date, text) => ipcRenderer.send('journal:save', date, text),
-    saveAllJournals: (merged) => ipcRenderer.send('journal:saveAll', merged),
-    onJournalUpdated: (callback) => {
-        const handler = (_e, date, text) => callback(date, text);
-        ipcRenderer.on('journal:updated', handler);
-        return () => ipcRenderer.removeListener('journal:updated', handler);
-    },
-    onJournalAllUpdated: (callback) => {
-        const handler = (_e, merged) => callback(merged);
-        ipcRenderer.on('journal:allUpdated', handler);
-        return () => ipcRenderer.removeListener('journal:allUpdated', handler);
+    saveNote: (payload) => ipcRenderer.send('note:save', payload),
+    onNoteUpdated: (callback) => {
+        const handler = (_e, payload) => callback(payload);
+        ipcRenderer.on('note:updated', handler);
+        return () => ipcRenderer.removeListener('note:updated', handler);
     },
 });

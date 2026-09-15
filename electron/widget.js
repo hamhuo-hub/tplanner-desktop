@@ -1,10 +1,12 @@
 import { applyCategory, initializeWindowControls } from './widget-shared.mjs';
-import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
 
 /* tPlanner Today Widget — vanilla renderer.
- * Receives event lists from the main process via window.widgetAPI
- * (set up by widget-preload.cjs). All persistence and reminder firing
- * happen in main; this file only renders.
+ *
+ * It renders the read-only projection that the React renderer pushes to main:
+ * rows carry { uid, title, start, due, completed, checklist, note, colorId, dateKey,
+ * repeats, pending } with epoch-millisecond times and null for an absent time. Ticking a
+ * task is an INTENT — main relays it to the renderer, which owns the canonical store.
+ * This file never persists anything and never assumes an intent applied.
  */
 (function () {
   'use strict';
@@ -12,7 +14,7 @@ import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
   var DOWS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
   var state = {
-    events: [],
+    rows: [],
     now: new Date(),
   };
 
@@ -33,40 +35,49 @@ import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
   function pad2(n) { return n < 10 ? '0' + n : '' + n; }
 
-  function fmtTime(d) { return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
+  function fmtTime(ms) { var d = new Date(ms); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
   function fmtDate(d) { return d.getMonth() + 1 + '月' + d.getDate() + '日 · ' + DOWS[d.getDay()]; }
+  function todayKeyOf(now) {
+    return now.getFullYear() + '-' + pad2(now.getMonth() + 1) + '-' + pad2(now.getDate());
+  }
 
-  function isSameDay(a, b) {
-    return a.getFullYear() === b.getFullYear()
-        && a.getMonth() === b.getMonth()
-        && a.getDate() === b.getDate();
+  /** A task's deadline is DUE when present, otherwise DTSTART. Never invented. */
+  function dueAt(row) {
+    return row.due !== null && row.due !== undefined ? row.due
+      : (row.start !== null && row.start !== undefined ? row.start : null);
   }
 
   // ── Filtering / sorting ────────────────────────────────────────────
-  function eventsForToday() {
-    var now = state.now;
-    const today = state.events.filter(function (e) {
-      // Includes: events that start today, end today, or span over today
-      return isSameDay(e.start, now) || isSameDay(e.end, now)
-          || (e.start.getTime() <= now.getTime() && e.end.getTime() >= now.getTime());
-    }).sort(function (a, b) { return a.start.getTime() - b.start.getTime(); });
-    // Today remains a date-scoped view; completed history keeps its own section.
-    return selectNextPendingOccurrences(today, { keepCompleted: true });
+  // Today = today's date key, or anything already overdue and unfinished. `dateKey` is
+  // computed once by the renderer with the user's display timezone, so this widget never
+  // re-derives a date and cannot disagree with the main window.
+  function rowsForToday() {
+    var nowTs = state.now.getTime();
+    var today = todayKeyOf(state.now);
+    return state.rows.filter(function (row) {
+      if (row.dateKey === today) return true;
+      var deadline = dueAt(row);
+      return deadline !== null && deadline < nowTs && !row.completed;
+    }).sort(function (a, b) {
+      var left = dueAt(a); var right = dueAt(b);
+      if (left === null) return right === null ? String(a.title).localeCompare(String(b.title)) : 1;
+      if (right === null) return -1;
+      return left - right;
+    });
   }
 
-  function statusFor(e, nowTs) {
-    var s = e.start.getTime();
-    var en = e.end.getTime();
-    if (en < nowTs) return 'past';
-    if (s <= nowTs && nowTs <= en) return 'now';
-    if (s - nowTs <= 5 * 60 * 1000) return 'soon';
+  function statusFor(row, nowTs) {
+    var deadline = dueAt(row);
+    if (deadline === null) return 'unscheduled';
+    if (deadline < nowTs) return 'past';
+    if (deadline - nowTs <= 5 * 60 * 1000) return 'soon';
     return 'future';
   }
 
   // ── Render ─────────────────────────────────────────────────────────
   function renderHeader() {
     $('hdr-date').textContent = fmtDate(state.now);
-    var todays = eventsForToday();
+    var todays = rowsForToday();
     $('hdr-sub').textContent = todays.length === 0
       ? '今日空闲'
       : '今日 ' + todays.length + ' 项';
@@ -75,7 +86,7 @@ import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
   function renderList() {
     var list = $('list');
     clear(list);
-    var todays = eventsForToday();
+    var todays = rowsForToday();
     if (todays.length === 0) {
       var empty = el('div', 'empty');
       var icon = el('div', 'empty-icon'); icon.textContent = '✓';
@@ -88,20 +99,22 @@ import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
     }
 
     var nowTs = state.now.getTime();
-    var groups = { current: [], upcoming: [], past: [], done: [] };
-    todays.forEach(function (e) {
-      // Completed tasks go to dedicated "done" group
-      if (e.type === 'task' && e.completed) { groups.done.push(e); return; }
-      var st = statusFor(e, nowTs);
-      if (st === 'past') groups.past.push(e);
-      else if (st === 'now') groups.current.push(e);
-      else groups.upcoming.push(e);
+    var groups = { current: [], upcoming: [], past: [], done: [], unscheduled: [] };
+    todays.forEach(function (row) {
+      // Completed tasks go to a dedicated "done" group
+      if (row.completed) { groups.done.push(row); return; }
+      var st = statusFor(row, nowTs);
+      if (st === 'unscheduled') groups.unscheduled.push(row);
+      else if (st === 'past') groups.past.push(row);
+      else if (st === 'soon') groups.current.push(row);
+      else groups.upcoming.push(row);
     });
 
     var sections = [
-      { key: 'current',  label: '进行中', list: groups.current },
+      { key: 'current',  label: '即将到期', list: groups.current },
       { key: 'upcoming', label: '稍后',   list: groups.upcoming },
-      { key: 'past',     label: '已过',   list: groups.past },
+      { key: 'past',     label: '已逾期', list: groups.past },
+      { key: 'unscheduled', label: '无时间', list: groups.unscheduled },
     ];
 
     sections.forEach(function (sec) {
@@ -155,39 +168,34 @@ import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
     var doneCount = checklist.filter(function(i) { return i.completed; }).length;
     var allDone = hasChecklist ? doneCount === checklist.length : true;
 
-    var completed = e.type === 'task' && e.completed;
-    var item = el('div', 'item' + (e.type === 'task' ? ' task' : '')
+    var completed = Boolean(e.completed);
+    var item = el('div', 'item task'
       + (completed ? ' done' : '')
-      + (!completed && status === 'now' ? ' now' : '')
       + (!completed && status === 'past' ? ' past' : ''));
     applyCategory(item, e.colorId);
-    if (e.type === 'task') {
-      var bullet = el('button', 'task-check');
-      bullet.type = 'button';
-      bullet.setAttribute('role', 'checkbox');
-      bullet.setAttribute('aria-checked', String(Boolean(e.completed)));
-      bullet.setAttribute('aria-label', (e.completed ? '取消完成：' : '完成：') + (e.title || '无标题任务'));
-      var check = el('span', 'check-mark');
-      check.setAttribute('aria-hidden', 'true');
-      check.textContent = e.completed ? '✓' : '';
-      bullet.appendChild(check);
-      // Block main toggle if subtasks not all done
-      bullet.title = hasChecklist && !allDone ? '请先完成所有子任务' : '';
-      bullet.disabled = hasChecklist && !allDone && !e.completed;
-      if (bullet.disabled) bullet.setAttribute('aria-label', '请先完成所有子任务：' + (e.title || '无标题任务'));
-      bullet.addEventListener('click', function (ev) {
-        ev.stopPropagation();
-        if (hasChecklist && !allDone && !e.completed) return;
-        if (window.widgetAPI && window.widgetAPI.toggleTask) {
-          window.widgetAPI.toggleTask(e.id);
-        }
-      });
-      item.appendChild(bullet);
-    } else {
-      var bar = el('span', 'item-bullet color-bar');
-      bar.setAttribute('aria-hidden', 'true');
-      item.appendChild(bar);
-    }
+
+    var bullet = el('button', 'task-check');
+    bullet.type = 'button';
+    bullet.setAttribute('role', 'checkbox');
+    bullet.setAttribute('aria-checked', String(completed));
+    bullet.setAttribute('aria-label', (completed ? '取消完成：' : '完成：') + (e.title || '无标题任务'));
+    var check = el('span', 'check-mark');
+    check.setAttribute('aria-hidden', 'true');
+    check.textContent = completed ? '✓' : '';
+    bullet.appendChild(check);
+    // Block the parent toggle until every checklist item is done
+    var blocked = hasChecklist && !allDone && !completed;
+    bullet.title = blocked ? '请先完成所有子任务' : '';
+    bullet.disabled = blocked;
+    if (blocked) bullet.setAttribute('aria-label', '请先完成所有子任务：' + (e.title || '无标题任务'));
+    bullet.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      if (blocked) return;
+      if (window.widgetAPI && window.widgetAPI.toggleTask) {
+        window.widgetAPI.toggleTask(e.uid);
+      }
+    });
+    item.appendChild(bullet);
 
     var body = el('div', 'item-body');
     var row1 = el('div', 'item-row1');
@@ -209,22 +217,28 @@ import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
     if (completed) {
       var tag3 = el('span', 'item-tag done'); tag3.textContent = '完成';
       row1.appendChild(tag3);
-    } else if (status === 'now') {
-      var tag = el('span', 'item-tag now'); tag.textContent = '现在';
-      row1.appendChild(tag);
     } else if (status === 'soon') {
       var tag2 = el('span', 'item-tag soon'); tag2.textContent = '即将';
       row1.appendChild(tag2);
     } else if (status === 'past') {
-      var pastTag = el('span', 'item-tag past'); pastTag.textContent = '已过';
+      var pastTag = el('span', 'item-tag past'); pastTag.textContent = '已逾期';
       row1.appendChild(pastTag);
+    }
+    if (e.pending) {
+      var pendingTag = el('span', 'item-tag soon'); pendingTag.textContent = '待上传';
+      row1.appendChild(pendingTag);
     }
     body.appendChild(row1);
 
     var row2 = el('div', 'item-row1');
-    var timeStr = fmtTime(e.start) + ' – ' + fmtTime(e.end);
     var time = el('span', 'item-time');
-    time.textContent = timeStr;
+    if (e.start === null || e.start === undefined) {
+      time.textContent = e.due !== null && e.due !== undefined ? '截止 ' + fmtTime(e.due) : '无时间';
+    } else {
+      time.textContent = e.due !== null && e.due !== undefined
+        ? fmtTime(e.start) + ' – ' + fmtTime(e.due)
+        : fmtTime(e.start);
+    }
     row2.appendChild(time);
     if (e.note) {
       var note = el('span', 'item-note');
@@ -254,7 +268,7 @@ import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
           row.addEventListener('click', function(ev) {
             ev.stopPropagation();
             if (window.widgetAPI && window.widgetAPI.toggleSubtask) {
-              window.widgetAPI.toggleSubtask(e.id, subId);
+              window.widgetAPI.toggleSubtask(e.uid, subId);
             }
           });
           row.appendChild(sbullet);
@@ -285,18 +299,13 @@ import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
   }
 
   function renderStats() {
-    var todays = eventsForToday();
-    var taskTotal = todays.filter(function (e) { return e.type === 'task'; }).length;
-    var taskDone  = todays.filter(function (e) { return e.type === 'task' && e.completed; }).length;
+    var todays = rowsForToday();
+    var taskTotal = todays.length;
+    var taskDone  = todays.filter(function (e) { return e.completed; }).length;
     var stats = $('stats');
     clear(stats);
-    if (taskTotal > 0) {
-      var s1 = el('span'); s1.textContent = '任务 ' + taskDone + '/' + taskTotal;
-      stats.appendChild(s1);
-    } else {
-      var s2 = el('span'); s2.textContent = '事件 ' + todays.length;
-      stats.appendChild(s2);
-    }
+    var s1 = el('span'); s1.textContent = '任务 ' + taskDone + '/' + taskTotal;
+    stats.appendChild(s1);
     var nowStr = fmtTime(state.now);
     var s3 = el('span'); s3.textContent = '· ' + nowStr;
     stats.appendChild(s3);
@@ -311,12 +320,8 @@ import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
 
   // ── Event wiring ───────────────────────────────────────────────────
   function setEvents(arr) {
-    state.events = (arr || []).map(function (e) {
-      return Object.assign({}, e, {
-        start: new Date(e.start),
-        end:   new Date(e.end),
-      });
-    });
+    // The projection already carries epoch milliseconds and null for an absent time.
+    state.rows = Array.isArray(arr) ? arr.slice() : [];
     render();
   }
 
@@ -334,7 +339,7 @@ import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
       return;
     }
 
-    // Initial pull from main
+    // Initial pull from main (the renderer pushes an update as soon as it has one)
     api.getEvents().then(setEvents).catch(function () { setEvents([]); });
 
     // Live updates from main process
@@ -345,7 +350,7 @@ import { selectNextPendingOccurrences } from './recurringTaskSelection.mjs';
       api.getEvents().then(setEvents);
     });
 
-    // Re-render every 30s so "current/past/upcoming" stays accurate
+    // Re-render every 30s so "upcoming/overdue" stays accurate between projections
     setInterval(render, 30 * 1000);
   }
 

@@ -2,8 +2,12 @@ import { useState } from 'react';
 import { Bell, ChevronDown, ChevronUp } from 'lucide-react';
 import { formatInTimeZone } from 'date-fns-tz';
 import { useTranslation } from 'react-i18next';
-import { EVENT_TYPES } from '../utils/constants';
-
+/**
+ * "Starting soon / ongoing" banner.
+ *
+ * Purely a read of DTSTART/DUE of scheduled records — the client has no custom alarm
+ * scheduler and this banner never fires anything (docs/sync-v5.md).
+ */
 export default function ReminderBanner({ events, onHighlight, travelTimezone }) {
     const { t } = useTranslation();
     const [isExpanded, setIsExpanded] = useState(false);
@@ -11,14 +15,17 @@ export default function ReminderBanner({ events, onHighlight, travelTimezone }) 
     const now = new Date();
     const windowMs = 90 * 60 * 1000; // 90 min ahead (3× lead time)
 
-    const upcoming = events.filter(e =>
-        e.type === EVENT_TYPES.EVENT &&
+    const scheduled = events.filter(e => e.kind === 'task' && e.start instanceof Date
+        && !Number.isNaN(e.start.getTime()));
+
+    const upcoming = scheduled.filter(e =>
+        !e.completed &&
         e.start > now &&
         e.start.getTime() - now.getTime() <= windowMs
     ).sort((a, b) => a.start - b.start);
 
-    const ongoing = events.filter(e =>
-        e.type === EVENT_TYPES.EVENT &&
+    const ongoing = scheduled.filter(e =>
+        !e.completed &&
         e.start <= now &&
         e.end > now
     ).sort((a, b) => a.start - b.start);

@@ -6,9 +6,13 @@ import { categoryForId, TaskCheckbox, TaskProgress } from '../design-system';
 import { X } from 'lucide-react';
 import { getDateLocale } from '../utils/dateLocale';
 import NoteEditor from './NoteEditor';
-import { recurrenceOf } from '../domain/recurringTasks.mjs';
-import { seriesIdOf } from '../domain/recurringTaskSelection.mjs';
-
+/**
+ * Read-only detail surface for one canonical record.
+ *
+ * Facts come from the jCal projection row (`uid`, `due`, `hasDue`, `recurrenceText`,
+ * `checklist`). Actions write back through the store; a repeating record is one document, so
+ * deleting it deletes the whole record and its recurrence exceptions.
+ */
 export default function EventDetailsModal({ event, travelTimezone, onClose, onDelete, onEdit, onSave }) {
     const { t, i18n } = useTranslation();
     const locale = getDateLocale(i18n.language);
@@ -31,8 +35,8 @@ export default function EventDetailsModal({ event, travelTimezone, onClose, onDe
         if (!onSave || saving) return;
         const newChecklist = event.checklist.map((item, itemIndex) =>
             itemIndex === index ? { ...item, completed } : item);
-        // Preserve automatic parent completion when every subtask is complete.
-        const allDone = newChecklist.every(item => item.completed);
+        // Preserve automatic parent completion when every checklist item is complete.
+        const allDone = newChecklist.length > 0 && newChecklist.every(item => item.completed);
         const anyUndone = newChecklist.some(item => !item.completed);
         const session = detailSessionRef.current;
         try {
@@ -78,42 +82,40 @@ export default function EventDetailsModal({ event, travelTimezone, onClose, onDe
                     <div>
                         <span className="modal-label">{t('event.timeLabel')}</span>
                         <p className="modal-value">
-                            {format(event.start, 'EEEE, d MMMM yyyy', { locale })}
-                            <br />
-                            <span style={{ color: 'var(--tp-semantic-color-accent-text)', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-                                {format(event.start, 'HH:mm')} — {format(event.end, 'HH:mm')}
-                            </span>
+                            {event.start === null && event.due === null ? (
+                                // An absent time stays absent: no date is invented for display.
+                                <span style={{ color: 'var(--clr-text-dim)' }}>{t('task.noTime')}</span>
+                            ) : (
+                                <>
+                                    {format(event.start, 'EEEE, d MMMM yyyy', { locale })}
+                                    <br />
+                                    <span style={{ color: 'var(--tp-semantic-color-accent-text)', fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                                        {formatInTimeZone(event.start, travelTimezone || undefined, 'HH:mm')}
+                                        {event.hasDue && ` — ${formatInTimeZone(event.due, travelTimezone || undefined, 'HH:mm')}`}
+                                    </span>
+                                </>
+                            )}
                         </p>
                         {/* Timezone display */}
                         <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                             <span className="modal-timezone-label">{t('event.originalTz')}</span>
-                            {(() => {
-                                const displayTz = event.timezone || 'Asia/Shanghai';
-                                return (
-                                    <>
-                                        <span className="modal-timezone-time">
-                                            {formatInTimeZone(event.start, displayTz, 'HH:mm')} — {formatInTimeZone(event.end, displayTz, 'HH:mm')}
-                                        </span>
-                                        <span className="modal-timezone-badge">
-                                            {displayTz.split('/').pop().replace(/_/g, ' ')}
-                                        </span>
-                                    </>
-                                );
-                            })()}
+                            <span className="modal-timezone-time">{event.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone}</span>
+                            <span className="modal-timezone-badge">
+                                {(event.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone).split('/').pop().replace(/_/g, ' ')}
+                            </span>
                         </div>
                     </div>
 
-                    {event.type === 'task' && <div>
+                    <div>
                         <span className="modal-label">{t('event.recurrence', '重复')}</span>
                         <p className="modal-value">
-                            {t(`recurrence.${recurrenceOf(event)?.frequency || 'none'}`)}
-                            {recurrenceOf(event) && ` · ${recurrenceOf(event).count} ${t('recurrence.occurrences', '次')}`}
-                            {seriesIdOf(event) && ` · ${t('recurrence.member', '第 {{index}} 次', { index: (event.recurrence?.occurrenceIndex ?? 0) + 1 })}`}
+                            {event.recurrenceText ?? t('recurrence.none')}
+                            {event.exceptionCount > 0 && ` · ${t('recurrence.exceptions', { count: event.exceptionCount })}`}
                         </p>
                         {onEdit && <button type="button" className="btn" onClick={() => { onEdit(event); onClose(); }}>
-                            {t(seriesIdOf(event) ? 'recurrence.editSeries' : 'recurrence.setRepeat', seriesIdOf(event) ? '修改重复系列' : '设置重复')}
+                            {t(event.repeats ? 'recurrence.editSeries' : 'recurrence.setRepeat', event.repeats ? '修改重复系列' : '设置重复')}
                         </button>}
-                    </div>}
+                    </div>
 
                     {/* Note */}
                     <div>
@@ -162,7 +164,7 @@ export default function EventDetailsModal({ event, travelTimezone, onClose, onDe
                             ) : (
                                 <>
                                     <span className="modal-delete-confirmation">
-                                        {seriesIdOf(event) ? t('recurrence.deleteOccurrence', '仅删除此次任务？') : t('messages.deleteConfirmation')}
+                                        {event.repeats ? t('recurrence.deleteWholeSeries') : t('messages.deleteConfirmation')}
                                     </span>
                                     <button className="btn btn--danger" disabled={saving} onClick={deleteOccurrence}>
                                         {t('actions.confirm')}

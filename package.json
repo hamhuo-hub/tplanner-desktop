@@ -18,7 +18,7 @@
   "build": {
     "appId": "com.tplanner.app",
     "productName": "tPlanner",
-    "copyright": "Copyright © 2026",
+    "copyright": "Copyright \u00a9 2026",
     "directories": {
       "output": "release",
       "buildResources": "build-resources"
@@ -127,8 +127,6 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-i18next": "^16.5.4",
-    "rxdb": "^17.3.0",
-    "rxjs": "^7.8.2",
     "tailwind-merge": "^3.4.0",
     "tailwindcss": "^4.1.18",
     "terser": "^5.46.2",
@@ -139,8 +137,6 @@
     "vite-plugin-electron-renderer": "^0.14.6"
   },
   "dependencies": {
-    "canonicalize": "^4.0.0",
-    "framer-motion": "^12.40.0",
-    "uuid": "^14.0.2"
+    "framer-motion": "^12.40.0"
   }
 }

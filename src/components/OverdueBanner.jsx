@@ -3,11 +3,12 @@ import { AlertCircle, Clock, ChevronDown, ChevronUp } from 'lucide-react';
 import { formatInTimeZone } from 'date-fns-tz';
 import { differenceInCalendarDays, differenceInHours, addDays, endOfDay } from 'date-fns';
 import { useTranslation } from 'react-i18next';
-import { selectNextPendingOccurrences } from '../domain/recurringTaskSelection.mjs';
-
-// deadline time: tasks use .end, reminders/events use .start
-function deadline(ev) {
-    return ev.type === 'task' ? ev.end : ev.start;
+/**
+ * Deadline of a record: DUE when it exists, otherwise DTSTART. Rows are the canonical jCal
+ * projection, so a record with no time at all has no deadline and is never listed here.
+ */
+function deadline(row) {
+    return row.due ?? row.start;
 }
 
 function daysLabel(ev, now, t) {
@@ -26,24 +27,20 @@ export default function OverdueBanner({ events, onHighlight, travelTimezone }) {
 
     const now = new Date();
     const tz = travelTimezone || 'Asia/Shanghai';
-    const pendingEvents = selectNextPendingOccurrences(events);
+    const pendingEvents = events.filter(row => row.kind === 'task' && deadline(row) !== null);
 
-    // Overdue: only tasks (reminders don't have a "completed" concept)
+    // Overdue: an unfinished task whose deadline has passed.
     const overdueTasks = pendingEvents
-        .filter(e => e.type === 'task' && !e.completed && e.end < now)
-        .sort((a, b) => a.end - b.end);
+        .filter(e => !e.completed && deadline(e) < now)
+        .sort((a, b) => deadline(a) - deadline(b));
 
-    // Upcoming: tasks (not yet expired) + reminders/events (not yet started)，
-    // 只看明后两天（今天剩余 + 明天），不应该把所有未来事项都列进来。
+    // Upcoming: 只看今明两天（今天剩余 + 明天），不把所有未来事项都列进来。
     const upcomingCutoff = endOfDay(addDays(now, 1));
     const upcomingTasks = pendingEvents
         .filter(e => {
-            if (e.type === 'status') return false;
             const d = deadline(e);
             if (d > upcomingCutoff) return false;
-            if (e.type === 'task') return !e.completed && e.end >= now;
-            // event/reminder: show if start is in the future
-            return e.start >= now;
+            return !e.completed && d >= now;
         })
         .sort((a, b) => deadline(a) - deadline(b))
         .slice(0, 20);

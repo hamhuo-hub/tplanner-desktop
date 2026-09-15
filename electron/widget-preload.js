@@ -5,10 +5,10 @@ const { contextBridge, ipcRenderer } = require('electron');
  * Exposes a minimal IPC surface used by widget.js.
  */
 contextBridge.exposeInMainWorld('widgetAPI', {
-    /** Pull current events from main (Promise<Event[]>). */
+    /** Pull the current task projection from main (Promise<TaskRow[]>). */
     getEvents: () => ipcRenderer.invoke('widget:getEvents'),
 
-    /** Subscribe to live event-list updates pushed by main. */
+    /** Subscribe to projection updates pushed by main. */
     onEvents: (callback) => {
         const handler = (_e, list) => callback(list);
         ipcRenderer.on('widget:events', handler);
@@ -25,18 +25,12 @@ contextBridge.exposeInMainWorld('widgetAPI', {
     toggleAlwaysOnTop: () => ipcRenderer.invoke('widget:toggleAlwaysOnTop'),
     isAlwaysOnTop:     () => ipcRenderer.invoke('widget:isAlwaysOnTop'),
 
-    /** Toggle a task's completed flag (round-trips through main). */
-    toggleTask: (eventId) => ipcRenderer.send('widget:toggleTask', eventId),
+    /**
+     * Task interactions are INTENTS sent to the renderer, which owns the canonical store.
+     * The widget never assumes the change applied until the new projection arrives.
+     */
+    toggleTask: (uid) => ipcRenderer.send('widget:toggleTask', uid),
 
-    /** Toggle an individual subtask checklist item. */
-    toggleSubtask: (eventId, subtaskId) => ipcRenderer.send('widget:toggleSubtask', eventId, subtaskId),
-
-    // ── Daily Checklist ────────────────────────────────────────────────────
-    getChecklists:  () => ipcRenderer.invoke('checklist:getAll'),
-    saveChecklist:  (date, items) => ipcRenderer.send('checklist:save', date, items),
-    onChecklistUpdated: (callback) => {
-        const handler = (_e, date, items) => callback(date, items);
-        ipcRenderer.on('checklist:updated', handler);
-        return () => ipcRenderer.removeListener('checklist:updated', handler);
-    },
+    /** Toggle an individual checklist item (also an intent). */
+    toggleSubtask: (uid, subtaskId) => ipcRenderer.send('widget:toggleSubtask', uid, subtaskId),
 });

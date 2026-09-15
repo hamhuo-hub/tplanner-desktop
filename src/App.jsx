@@ -1,988 +1,483 @@
-import { useState, useMemo, useEffect, useRef, useCallback } from 'react'
-import { debounceTime } from 'rxjs'
-import { format } from 'date-fns'
-import { useTranslation } from 'react-i18next'
-import Timeline from './components/Timeline'
-import AddEventModal from './components/AddEventModal'
-import EventDetailsModal from './components/EventDetailsModal'
-import ClashBanner from './components/ClashBanner'
-import OverdueBanner from './components/OverdueBanner'
-import ReminderBanner from './components/ReminderBanner'
-import TitleBar from './components/TitleBar'
-import ZoomControl from './components/ZoomControl'
-import LanSync from './components/LanSync'
-import DebugPanel from './components/DebugPanel'
-import ContextMenu from './components/ContextMenu'
-import { checkForClashes } from './utils/dateUtils'
-import { TIMEZONES } from './utils/constants'
-import { Plus, Languages, Printer, Globe, Download, Upload, Power, X } from 'lucide-react'
-import { getDatabase } from './database/db'
-import { toDatabaseEvent } from './database/schema'
-import { buildRecurringEdit, expandSharedContentUpdates, recoverLegacySeries, detachFromSeries, deleteRecurringOccurrences } from './domain/recurringTasks.mjs'
-import { now as clockNow } from './utils/clock'
-import * as webApi from './utils/webDataAdapter'
-import LoginScreen from './components/LoginScreen'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { format } from 'date-fns';
+import { useTranslation } from 'react-i18next';
+import { Plus, Languages, Printer, Download, LogOut, FileText, LayoutList, CalendarDays } from 'lucide-react';
+import TaskList from './components/TaskList';
+import Timeline from './components/Timeline';
+import AddEventModal from './components/AddEventModal';
+import EventDetailsModal from './components/EventDetailsModal';
+import ClashBanner from './components/ClashBanner';
+import OverdueBanner from './components/OverdueBanner';
+import ReminderBanner from './components/ReminderBanner';
+import TitleBar from './components/TitleBar';
+import ZoomControl from './components/ZoomControl';
+import LanSync from './components/LanSync';
+import DebugPanel from './components/DebugPanel';
+import ContextMenu from './components/ContextMenu';
+import LoginScreen from './components/LoginScreen';
+import { checkForClashes, calculateTimelineRange } from './utils/dateUtils';
+import { TIMEZONES } from './utils/constants';
+import useSyncV5 from './hooks/useSyncV5';
+import { clearSession, storedSession } from './syncV5/session.js';
+import {
+    dateGroups, duplicateTask, inboxRows, noteRows, noteUpdate, rowsOnDay, todayRows, viewRows, withChecklist,
+} from './syncV5/document.js';
+import { downloadIcs, exportToIcs } from './syncV5/ics.js';
+import { exportElectronProjection, showTodayWidget } from './syncV5/platform.js';
 
-function createViewRange(anchorDate = new Date()) {
-    const anchor = new Date(anchorDate);
-    anchor.setHours(0, 0, 0, 0);
+const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
+const CLOSED_EDITOR = { open: false, row: null, dayKey: null };
 
-    const start = new Date(anchor);
-    start.setDate(anchor.getDate() - 7);
+/** The three views the product keeps, plus the editor's create target. */
+const VIEWS = ['today', 'inbox', 'date'];
 
-    const end = new Date(anchor);
-    end.setDate(anchor.getDate() + 30);
-
-    return { start, end };
-}
-
-function hydrateEventDocuments(docs) {
-    return docs.map(doc => {
-        const event = doc.toJSON();
-        const start = new Date(event.start);
-        const end = new Date(event.end);
-
-        if (
-            Number.isNaN(start.getTime()) ||
-            Number.isNaN(end.getTime())
-        ) {
-            console.error(
-                '[INVALID EVENT DATE]',
-                event.id,
-                JSON.stringify(event.start),
-                JSON.stringify(event.end),
-            );
-        }
-
-        return { ...event, start, end };
-    });
-}
-
-function PlannerApp() {
+function PlannerApp({ session, onSignOut }) {
     const { t, i18n } = useTranslation();
-    const [events, setEvents] = useState([]);
+    const sync = useSyncV5(session);
+    const [travelTimezone, setTravelTimezone] = useState(() => globalThis.localStorage?.getItem('tplanner_travel_timezone') || '');
+    const [mode, setMode] = useState('date');
+    const [dateMode, setDateMode] = useState('list');
+    const [viewRange, setViewRange] = useState(() => calculateTimelineRange([], new Date()));
+    const [editor, setEditor] = useState(CLOSED_EDITOR);
+    const [selectedUid, setSelectedUid] = useState(null);
+    const [contextMenu, setContextMenu] = useState(null);
+    const [notice, setNotice] = useState('');
     const [highlight, setHighlight] = useState(null);
-    const [travelTimezone, setTravelTimezone] = useState('');
+    const lastPushRef = useRef('');
+    const lastNoteRef = useRef('');
 
-    const [contextMenu, setContextMenu] = useState(null); // { x, y, event }
-    const [clipboard, setClipboard]   = useState(null);  // event waiting to be pasted
-    const [autoLaunch, setAutoLaunch] = useState(false);
-    const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-    const [selectedEvent, setSelectedEvent] = useState(null);
-    const [selectedIds, setSelectedIds] = useState(() => new Set()); // box-select for batch ops
-    const [modalDefaultDate, setModalDefaultDate] = useState(null);
-    const [editingEvent, setEditingEvent] = useState(null);
-    const [isLoaded, setIsLoaded] = useState(false);
-    const [db, setDb] = useState(null);
-    // Detect Electron environment
-    const isElectron = typeof window !== 'undefined' && !!window.electronAPI;
-    const [syncRequest, setSyncRequest] = useState({ sequence: 0, dataset: null });
-    const requestUnitSync = useCallback((dataset) => {
-        if (!isElectron) return;
-        setSyncRequest(previous => ({ sequence: previous.sequence + 1, dataset }));
-    }, [isElectron]);
-    const eventsRef = useRef(events);
-    eventsRef.current = events;
-    const localEventRevisionRef = useRef(0);
-    const localJournalRevisionRef = useRef(0);
+    const { documents } = sync;
+    const options = useMemo(() => ({ timeZone: travelTimezone }), [travelTimezone]);
+    const todayKey = format(new Date(), 'yyyy-MM-dd');
 
-    // ── Database & Native Init ───────────────────────────────────────────
-    // Electron: RxDB (IndexedDB) with observable subscription
-    // Web: fetch from sync server API (same machine)
-    useEffect(() => {
-        if (isElectron) {
-            let subscription;
-            getDatabase().then(async database => {
-                // ── 一次性 RxDB 投影重建钩子(维护用)────────────────────────
-                // localStorage 旗标存在时:只删 tplannerdb(RxDB 投影)并重载,
-                // 同步层 tplanner-sync-v3(outbox/cursor/receipts)不动。
-                // 投影随后由 Sync V3 从中央 authoritative snapshot 重建。
-                if (localStorage.getItem('tplanner_purge_rxdb') === '1') {
-                    localStorage.removeItem('tplanner_purge_rxdb');
-                    try {
-                        await database.remove();
-                        console.error('[RXDB PURGE] tplannerdb removed, reloading');
-                    } catch (err) {
-                        console.error('[RXDB PURGE] failed', err);
-                    }
-                    location.reload();
-                    return;
-                }
-                setDb(database);
-                subscription = database.events.find().$.pipe(debounceTime(50)).subscribe(docs => {
-                    setEvents(hydrateEventDocuments(docs));
-                    setIsLoaded(true);
-                });
-            }).catch(err => {
-                console.error("Failed to init RxDB", err);
-            });
+    /**
+     * One projection, four read-only views. `viewRows` reads the canonical jCal arrays;
+     * nothing below re-models a task.
+     */
+    const view = useMemo(() => {
+        const all = viewRows(documents, options);
+        const tasks = all.filter((row) => row.kind === 'task');
+        return {
+            tasks,
+            notes: noteRows(documents, options),
+            today: todayRows(tasks, todayKey),
+            inbox: inboxRows(tasks),
+            dated: dateGroups(tasks, todayKey),
+        };
+    }, [documents, options, todayKey]);
 
-            const savedTz = localStorage.getItem('tplanner_travel_timezone');
-            if (savedTz) setTravelTimezone(savedTz);
+    const scheduled = useMemo(
+        () => view.tasks.filter((row) => row.start instanceof Date && !Number.isNaN(row.start.getTime())),
+        [view.tasks],
+    );
+    const clashes = useMemo(() => checkForClashes(view.tasks), [view.tasks]);
+    const journals = useMemo(() => {
+        const map = {};
+        for (const [dayKey, row] of view.notes) map[dayKey] = row.document.description ?? '';
+        return map;
+    }, [view.notes]);
 
-            return () => { if (subscription) subscription.unsubscribe(); };
-        } else {
-            // Web mode: load directly from server API
-            webApi.loadEvents().then(ev => {
-                setEvents(ev);
-                setIsLoaded(true);
-            }).catch(err => {
-                console.error('Failed to load from server', err);
-                setIsLoaded(true); // show UI even if load fails
-            });
+    const selectedRow = useMemo(
+        () => (selectedUid ? view.tasks.find((row) => row.uid === selectedUid) ?? null : null),
+        [selectedUid, view.tasks],
+    );
 
-            const savedTz = localStorage.getItem('tplanner_travel_timezone');
-            if (savedTz) setTravelTimezone(savedTz);
-        }
-    }, [isElectron]);
+    const highlightRange = useCallback((range) => {
+        setHighlight(range);
+        setTimeout(() => setHighlight(null), 3000);
+    }, []);
 
-    // ── Electron Today-Widget Sync ────────────────────────────────────────
-    // Debounce: rapid RxDB updates (delete/batch) collapse into one IPC call
-    // ESC cancels paste mode
-    useEffect(() => {
-        if (!clipboard) return;
-        const handler = (e) => { if (e.key === 'Escape') setClipboard(null); };
-        window.addEventListener('keydown', handler);
-        return () => window.removeEventListener('keydown', handler);
-    }, [clipboard]);
-
-    // ESC clears box-selection
-    useEffect(() => {
-        if (selectedIds.size === 0) return;
-        const handler = (e) => { if (e.key === 'Escape') setSelectedIds(new Set()); };
-        window.addEventListener('keydown', handler);
-        return () => window.removeEventListener('keydown', handler);
-    }, [selectedIds]);
-
-    // Sync auto-launch state from tray menu changes
+    // ── Electron shell projection (widget / tray) ─────────────────────────────
+    // The renderer owns the canonical store, so main receives a read-only projection and
+    // reports widget interactions back as intents. This is not a second data model.
     useEffect(() => {
         if (!isElectron) return;
-        window.electronAPI?.getAutoLaunch().then(v => setAutoLaunch(!!v));
-        const off = window.electronAPI?.onAutoLaunchChanged?.((v) => setAutoLaunch(v));
+        const payload = view.tasks.map((row) => ({
+            uid: row.uid,
+            title: row.title,
+            start: row.start,
+            due: row.due,
+            completed: row.completed,
+            checklist: row.checklist,
+            note: row.note,
+            colorId: row.colorId,
+            repeats: row.repeats,
+            pending: row.pending,
+            dateKey: row.dateKey,
+        }));
+        const serialized = JSON.stringify(payload);
+        if (serialized === lastPushRef.current) return;
+        lastPushRef.current = serialized;
+        exportElectronProjection(payload);
+    }, [view.tasks]);
+
+    // Daily note projection for the Electron notes widget (canonical VJOURNAL text only).
+    useEffect(() => {
+        if (!isElectron || !window.electronAPI?.publishNote) return;
+        const note = view.notes.get(todayKey);
+        const payload = { dayKey: todayKey, text: note?.document.description ?? '' };
+        const serialized = JSON.stringify(payload);
+        if (serialized === lastNoteRef.current) return;
+        lastNoteRef.current = serialized;
+        window.electronAPI.publishNote(payload);
+    }, [view.notes, todayKey]);
+
+    /** Canonical daily-note write: an emptied note is removed instead of stored empty. */
+    const writeNote = useCallback(async (dayKey, text) => {
+        const uid = `journal:${dayKey}`;
+        const entry = documents.find((document) => document.uid === uid) ?? null;
+        const existing = entry?.calendar ? viewRows([entry], options)[0].document : null;
+        const update = noteUpdate(dayKey, text, existing);
+        if (!update) return;
+        if (update.operation === 'delete') await sync.removeDocument(uid);
+        else await sync.persist(update.document);
+    }, [documents, options, sync]);
+
+    // Note widget saves arrive as intents and go through the same store write path.
+    useEffect(() => {
+        if (!isElectron || !window.electronAPI?.onNoteIntent) return undefined;
+        const off = window.electronAPI.onNoteIntent(({ dayKey, text }) => {
+            if (typeof text !== 'string' || !dayKey) return;
+            writeNote(dayKey, text).catch((error) => console.error('[syncV5] note intent failed', error));
+        });
         return () => off?.();
-    }, [isElectron]);
+    }, [writeNote]);
 
-    // ── Web-mode auto-save to server ─────────────────────────────────────
-    // Debounced PUT on every events change; runs only in browser (not Electron).
-    const webEventSaveTimerRef = useRef(null);
-    const explicitEventSaveRef = useRef(false);
+    // ── Widget intents ────────────────────────────────────────────────────────
     useEffect(() => {
-        if (isElectron || !isLoaded) return;
-        clearTimeout(webEventSaveTimerRef.current);
-        const saveLatest = () => {
-            if (explicitEventSaveRef.current) {
-                webEventSaveTimerRef.current = setTimeout(saveLatest, 300);
-                return;
-            }
-            webApi.saveEvents(eventsRef.current).catch(err =>
-                console.error('Failed to save events to server', err)
-            );
-        };
-        webEventSaveTimerRef.current = setTimeout(saveLatest, 300);
-    }, [events, isLoaded, isElectron]);
-
-    useEffect(() => {
-        if (!isLoaded) return;
-        if (!isElectron || !window.electronAPI?.syncEvents) return;
-        const serial = events.map(e => ({
-            ...e,
-            start: e.start instanceof Date ? e.start.toISOString() : e.start,
-            end:   e.end   instanceof Date ? e.end.toISOString()   : e.end,
-        }));
-        window.electronAPI.syncEvents(serial);
-    }, [events, isLoaded, isElectron]);
-
-    // Mirror task-toggles done in the widget back into RxDB so both views agree.
-    useEffect(() => {
-        if (!isElectron || !window.electronAPI?.onEventsRemoteUpdate || !db) return;
-        const off = window.electronAPI.onEventsRemoteUpdate(async ({ id, completed, checklist }) => {
+        if (!isElectron || !window.electronAPI?.onTaskIntent) return undefined;
+        const off = window.electronAPI.onTaskIntent(({ uid, completed, checklist }) => {
+            const entry = documents.find((document) => document.uid === uid);
+            if (!entry) return;
+            const row = viewRows([entry], options)[0];
+            if (!row) return;
             try {
-                const doc = await db.events.findOne(id).exec();
-                if (doc) {
-                    const patch = { completed, updatedAt: clockNow() };
-                    if (checklist !== undefined) patch.checklist = checklist;
-                    await doc.update({ $set: patch });
-                    requestUnitSync('events');
-                }
-            } catch (err) {
-                console.error('Widget→RxDB sync failed', err);
+                let document = row.document;
+                if (Array.isArray(checklist)) document = withChecklist(document, checklist);
+                if (typeof completed === 'boolean') document = document.withCompleted(completed);
+                sync.persist(document);
+            } catch (error) {
+                console.error('[syncV5] widget intent failed', error);
             }
         });
-        return () => { if (typeof off === 'function') off(); };
-    }, [db, isElectron, requestUnitSync]);
+        return () => off?.();
+    }, [documents, options, sync]);
 
-    // ── Journal (随笔) ────────────────────────────────────────────────────
-    // 条目格式：{ text, updatedAt, deletedAt }，与 events 的 tombstone 模型一致。
-    // 删除时写入 deletedAt+updatedAt（而不是直接抹掉记录），这样合并时删除记录
-    // 能凭借更新的 updatedAt 战胜对端尚存的旧内容，从而修复"软删除时间戳失效
-    // 导致回环恢复"的问题。旧版纯字符串格式在读取时迁移为时间戳 0 的记录，
-    // 保证会被任何带时间戳的写入/删除覆盖。
-    const normalizeJournalEntry = (value) => {
-        if (value && typeof value === 'object') {
-            return { text: value.text || '', updatedAt: value.updatedAt || 0, deletedAt: value.deletedAt ?? null };
-        }
-        return { text: value || '', updatedAt: 0, deletedAt: null };
-    };
-    const normalizeJournals = (map) => {
-        const result = {};
-        for (const [date, value] of Object.entries(map || {})) {
-            result[date] = normalizeJournalEntry(value);
-        }
-        return result;
-    };
-
-    const [journals, setJournals] = useState({});
-    const journalsRef = useRef(journals);
-    journalsRef.current = journals;
-
-    // 用于展示的纯文本映射：过滤掉 tombstone，解包出 text
-    const visibleJournals = useMemo(() => {
-        const result = {};
-        for (const [date, entry] of Object.entries(journals)) {
-            if (entry && !entry.deletedAt) result[date] = entry.text;
-        }
-        return result;
-    }, [journals]);
-
-    useEffect(() => {
-        if (isElectron && window.electronAPI?.getJournals) {
-            window.electronAPI.getJournals().then(j => {
-                const normalized = normalizeJournals(j);
-                journalsRef.current = normalized;
-                setJournals(normalized);
-            });
-            const off1 = window.electronAPI.onJournalUpdated?.((date, entry) => {
-                const next = { ...journalsRef.current, [date]: normalizeJournalEntry(entry) };
-                journalsRef.current = next;
-                setJournals(next);
-                requestUnitSync('journals');
-            });
-            // LAN sync batch update
-            const off2 = window.electronAPI.onJournalAllUpdated?.(merged => {
-                const normalized = normalizeJournals(merged);
-                journalsRef.current = normalized;
-                setJournals(normalized);
-            });
-            return () => { off1?.(); off2?.(); };
-        } else {
-            // Web mode: load from server API (authoritative), fall back to localStorage
-            const data = {};
-            for (let i = 0; i < localStorage.length; i++) {
-                const k = localStorage.key(i);
-                if (k?.startsWith('tplanner_journal_')) {
-                    const raw = localStorage.getItem(k);
-                    let parsed;
-                    try { parsed = JSON.parse(raw); } catch { parsed = raw; }
-                    data[k.replace('tplanner_journal_', '')] = normalizeJournalEntry(parsed);
-                }
-            }
-            setJournals(data);
-            // Then try server (overwrites localStorage if server has newer data)
-            webApi.loadJournals().then(j => {
-                setJournals(normalizeJournals(j));
-                // Mirror server data back to localStorage
-                for (const [date, entry] of Object.entries(j)) {
-                    if (entry && !entry.deletedAt) {
-                        localStorage.setItem(`tplanner_journal_${date}`, JSON.stringify(entry));
-                    }
-                }
-            }).catch(() => { /* server unavailable, use localStorage */ });
-        }
-    }, [isElectron, requestUnitSync]);
-
-    const handleSaveJournal = (dateStr, text) => {
-        localJournalRevisionRef.current += 1;
-        const oldVer = journalsRef.current[dateStr]?.version || 0;
-        const ts = clockNow();
-        const entry = text?.trim()
-            ? { text, version: oldVer + 1, updatedAt: ts, deletedAt: null }
-            : { text: '', version: oldVer + 1, updatedAt: ts, deletedAt: ts };
-        const nextJournals = { ...journalsRef.current, [dateStr]: entry };
-        journalsRef.current = nextJournals;
-        setJournals(nextJournals);
-        if (isElectron && window.electronAPI?.saveJournal) {
-            window.electronAPI.saveJournal(dateStr, entry);
-        } else {
-            // Web mode: save to localStorage (instant) + server (debounced in useEffect below)
-            localStorage.setItem(`tplanner_journal_${dateStr}`, JSON.stringify(entry));
-        }
-        requestUnitSync('journals');
-    };
-
-    // ── Web-mode auto-save journals to server ─────────────────────────────
-    const webJournalSaveTimerRef = useRef(null);
-    useEffect(() => {
-        if (isElectron || Object.keys(journals).length === 0) return;
-        clearTimeout(webJournalSaveTimerRef.current);
-        webJournalSaveTimerRef.current = setTimeout(() => {
-            webApi.saveJournals(journals).catch(err =>
-                console.error('Failed to save journals to server', err)
-            );
-        }, 500);
-    }, [journals, isElectron]);
-
-    // Browser clients follow server snapshot versions via the shared V3 engine:
-    // 收到新版本 → 安装 → 刷新本地展示数据(无合并、无人工裁决)。
-    useEffect(() => {
-        if (isElectron || !isLoaded) return;
-        let disposed = false;
-
-        const refresh = async () => {
-            clearTimeout(webEventSaveTimerRef.current);
-            clearTimeout(webJournalSaveTimerRef.current);
-            const eventRevision = localEventRevisionRef.current;
-            const journalRevision = localJournalRevisionRef.current;
-            const display = await webApi.refreshAndGetDisplay(eventsRef.current, journalsRef.current);
-            if (disposed) return;
-            // A local change made while this request awaited the queue/network still
-            // owns its debounce save. An older projection must not replace that edit.
-            if (eventRevision === localEventRevisionRef.current) {
-                eventsRef.current = display.events;
-                setEvents(display.events);
-            }
-            if (journalRevision === localJournalRevisionRef.current) {
-                const remote = normalizeJournals(display.journals);
-                journalsRef.current = remote;
-                setJournals(remote);
-                for (const [date, entry] of Object.entries(remote)) {
-                    const key = `tplanner_journal_${date}`;
-                    if (entry?.deletedAt) localStorage.removeItem(key);
-                    else localStorage.setItem(key, JSON.stringify(entry));
-                }
-            }
-        };
-
-        const loop = async () => {
-            let retryDelay = 2000;
-            while (!disposed) {
-                try {
-                    const changed = await webApi.waitForServerChange();
-                    if (disposed) return;
-                    if (changed) await refresh();
-                    retryDelay = 2000;
-                } catch (error) {
-                    if (disposed) return;
-                    console.error('Remote change listener failed', error);
-                    await new Promise(r => setTimeout(r, retryDelay));
-                    retryDelay = Math.min(retryDelay * 2, 30_000);
-                }
-            }
-        };
-
-        loop();
-        return () => { disposed = true; };
-    }, [isElectron, isLoaded]);
-
-    const [viewRange, setViewRange] = useState(createViewRange);
-
-    const handleTimezoneChange = (e) => {
-        const value = e.target.value;
+    const handleTimezoneChange = (event) => {
+        const value = event.target.value;
         setTravelTimezone(value);
-        if (value) {
-            localStorage.setItem('tplanner_travel_timezone', value);
-        } else {
-            localStorage.removeItem('tplanner_travel_timezone');
-        }
+        if (value) globalThis.localStorage?.setItem('tplanner_travel_timezone', value);
+        else globalThis.localStorage?.removeItem('tplanner_travel_timezone');
     };
 
-    // Strip tombstones for display; sync payload keeps them to propagate deletions
-    const visibleEvents = useMemo(() => events.filter(e => !e.deletedAt), [events]);
-    const clashes = useMemo(() => checkForClashes(visibleEvents), [visibleEvents]);
-
-    const handleLoadMorePrev = () => {
-        if (!viewRange.start) return;
-        setViewRange(prev => {
-            const newStart = new Date(prev.start);
-            newStart.setDate(newStart.getDate() - 14);
-            return { ...prev, start: newStart };
-        });
+    const flash = (message) => {
+        setNotice(message);
+        setTimeout(() => setNotice(''), 4000);
     };
 
-    const handleLoadMoreNext = () => {
-        if (!viewRange.end) return;
-        setViewRange(prev => {
-            const newEnd = new Date(prev.end);
-            newEnd.setDate(newEnd.getDate() + 14);
-            return { ...prev, end: newEnd };
-        });
-    };
+    const saveDocument = useCallback((document) => sync.persist(document), [sync]);
 
-    const scrollTimelineToDate = (date, behavior = 'smooth') => {
-        const dateStr = format(date, 'yyyy-MM-dd');
-        const element = document.getElementById(`row-${dateStr}`);
-        const scrollContainer = element?.closest('.timeline-scroll-area');
-        if (!element || !scrollContainer) return false;
-
-        // Only scroll the timeline body. scrollIntoView() can also move outer
-        // ancestors/the page in browsers, which pushes the banners off-screen.
-        const elementRect = element.getBoundingClientRect();
-        const containerRect = scrollContainer.getBoundingClientRect();
-        const stickyHeaderHeight = scrollContainer.querySelector('.timeline-header')?.offsetHeight || 0;
-        scrollContainer.scrollTo({
-            top: Math.max(0, scrollContainer.scrollTop + elementRect.top - containerRect.top - stickyHeaderHeight),
-            behavior,
-        });
-        return true;
-    };
-
-    const handleToday = () => {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        setViewRange(createViewRange(today));
-        setTimeout(() => {
-            if (scrollTimelineToDate(today)) {
-                const startOfDay = new Date(today);
-                const endOfDay = new Date(today); endOfDay.setHours(23, 59, 59, 999);
-                setHighlight({ type: 'today', start: startOfDay, end: endOfDay });
-                setTimeout(() => setHighlight(null), 3000);
-            }
-        }, 100);
-    };
-
-    const handleJumpToDate = (date) => {
-        const target = new Date(date);
-        target.setHours(0, 0, 0, 0);
-        setViewRange(createViewRange(target));
-        setTimeout(() => {
-            scrollTimelineToDate(target);
-        }, 100);
-    };
-
-    const handleToggleTaskComplete = async (eventId, completedStatus) => {
-        if (!db) {
-            // Web mode: update state directly (autosave effect will PUT to server)
-            const now = clockNow();
-            localEventRevisionRef.current += 1;
-            const next = eventsRef.current.map(e =>
-                e.id === eventId ? { ...e, completed: completedStatus, version: (e.version || 0) + 1, updatedAt: now } : e
-            );
-            eventsRef.current = next;
-            setEvents(next);
-            return;
-        }
+    const runSave = async (operation) => {
         try {
-            const doc = await db.events.findOne(eventId).exec();
-            if (doc) {
-                const v = (doc.get('version') || 0) + 1;
-                await doc.update({ $set: { completed: completedStatus, version: v, updatedAt: clockNow() } });
-                requestUnitSync('events');
-            }
-        } catch (err) {
-            console.error('Update failed', err);
-        }
-    };
-
-    const handleSaveEvent = async (eventData, { original = null } = {}) => {
-        const current = eventsRef.current;
-        const input = Array.isArray(eventData) ? eventData : [eventData];
-        const planned = original ? buildRecurringEdit(current, original, input[0], clockNow()) : input;
-        const updates = expandSharedContentUpdates(current, planned);
-        const now = clockNow();
-        const byId = new Map(current.map(event => [event.id, event]));
-        const stamped = updates.map(update => ({
-            ...byId.get(update.id), ...update,
-            start: new Date(update.start), end: new Date(update.end),
-            version: (byId.get(update.id)?.version || update.version || 0) + 1,
-            updatedAt: now,
-        }));
-        if (!db) {
-            // Await durable outbox/server handling before closing the editor. The form keeps
-            // its stable draft IDs on failure, so retrying cannot create another series.
-            for (const event of stamped) byId.set(event.id, event);
-            const pending = [...byId.values()];
-            clearTimeout(webEventSaveTimerRef.current);
-            explicitEventSaveRef.current = true;
-            const savedRevision = ++localEventRevisionRef.current;
-            // Refresh/SSE must see the same local changes while the explicit save awaits
-            // acknowledgement, otherwise its full-data diff can write the old title back.
-            eventsRef.current = pending;
-            setEvents(pending);
-            try {
-                const saved = await webApi.saveEvents(pending);
-                if (savedRevision === localEventRevisionRef.current) {
-                    eventsRef.current = saved;
-                    setEvents(saved);
-                }
-            } finally { explicitEventSaveRef.current = false; }
-        } else {
-            const result = await db.events.bulkUpsert(stamped.map(toDatabaseEvent));
-            if (result.error?.length) throw new Error(t('messages.saveError', '保存失败，请重试'));
-            requestUnitSync('events');
-        }
-        setSelectedEvent(currentSelection => {
-            if (!currentSelection) return null;
-            const selected = stamped.find(event => event.id === currentSelection.id);
-            return selected ? (selected.deletedAt ? null : selected) : currentSelection;
-        });
-        // The invoking editor owns closing its session. A checkbox save must not close
-        // an editor opened later while that save was awaiting the network.
-    };
-
-    const handleDeleteEvent = async (id) => {
-        await handleSaveEvent(deleteRecurringOccurrences(eventsRef.current, [id], clockNow()));
-        setSelectedEvent(current => current?.id === id ? null : current);
-    };
-
-    // Explicit selection only; surviving series members retain the retired-ID ledger.
-    const handleBatchDelete = async (ids) => {
-        if (!ids?.length) return;
-        try {
-            await handleSaveEvent(deleteRecurringOccurrences(eventsRef.current, ids, clockNow()));
-            setSelectedIds(new Set());
+            await operation();
         } catch (error) {
-            console.error('Error batch deleting events', error);
+            flash(error?.message || t('messages.saveError', '保存失败，请重试'));
         }
     };
 
-    // Copy: store in clipboard, don't save yet
-    const handleCopyEvent = (event) => {
-        setClipboard(event);
-    };
+    const handleToggleComplete = (row, completed) => runSave(
+        () => saveDocument(row.document.withCompleted(completed)),
+    );
 
-    // Paste clipboard event at clicked time
-    const pasteClipboard = async (start) => {
-        if (!clipboard) return;
-        const duration = clipboard.end - clipboard.start;
-        const copy = {
-            ...detachFromSeries(clipboard),
-            id: crypto.randomUUID(),
-            title: clipboard.title + t('event.copySuffix'),
-            start: new Date(start),
-            end:   new Date(start.getTime() + duration),
-            completed: false,
-            version: 1,
-            deletedAt: 0,
-            updatedAt: clockNow(),
-            checklist: (clipboard.checklist || []).map(i => ({ ...i, id: crypto.randomUUID(), completed: false })),
-        };
-        if (!db) {
-            // Web mode: add directly to state
-            localEventRevisionRef.current += 1;
-            const next = [...eventsRef.current, copy];
-            eventsRef.current = next;
-            setEvents(next);
-            setClipboard(null);
+    const handleToggleChecklist = (row, itemId, completed) => runSave(() => {
+        const items = row.checklist.map((item) => (item.id === itemId ? { ...item, completed } : item));
+        let document = withChecklist(row.document, items);
+        const allDone = items.length > 0 && items.every((item) => item.completed);
+        if (allDone) document = document.withCompleted(true);
+        else if (row.completed) document = document.withCompleted(false);
+        return saveDocument(document);
+    });
+
+    const handleDelete = (row) => runSave(async () => {
+        await sync.removeDocument(row.uid);
+        if (selectedUid === row.uid) setSelectedUid(null);
+    });
+
+    const handleDuplicate = (row) => runSave(
+        () => saveDocument(duplicateTask(row.document, `${row.title}${t('event.copySuffix')}`)),
+    );
+
+    /**
+     * Reschedule from the timeline. This is an explicit user action, so writing DTSTART/DUE
+     * is the requested edit — never an invented date.
+     */
+    const handleTimelineUpdate = (updates) => runSave(async () => {
+        for (const update of updates) {
+            const row = view.tasks.find((item) => item.uid === (update.uid ?? update.id));
+            if (!row) continue;
+            const start = update.start instanceof Date ? update.start.getTime() : update.start;
+            let due = update.end instanceof Date ? update.end.getTime() : update.end;
+            if (!Number.isFinite(start)) continue;
+            if (!Number.isFinite(due) || due <= start) due = start + 60 * 60 * 1000;
+            await saveDocument(row.document.withSchedule(start, due));
+        }
+    });
+
+    /** Checklist toggles coming from the details editor, expressed as one canonical edit. */
+    const handleDetailsSave = (draft, meta) => runSave(async () => {
+        const row = meta?.original ?? view.tasks.find((item) => item.uid === draft.uid);
+        if (!row) return;
+        let document = withChecklist(row.document, draft.checklist ?? row.checklist);
+        document = document.withCompleted(Boolean(draft.completed));
+        await saveDocument(document);
+    });
+
+    const handleSaveNote = (dayKey, text) => runSave(() => writeNote(dayKey, text));
+
+    const handleExportIcs = () => {
+        const payload = exportToIcs(documents.map((entry) => entry.calendar));
+        if (!payload) {
+            flash(t('messages.nothingToExport'));
             return;
         }
-        try {
-            await db.events.insert(toDatabaseEvent(copy));
-            requestUnitSync('events');
-        } catch (err) {
-            console.error('Paste failed', err);
-        }
-        setClipboard(null);
+        downloadIcs(payload);
     };
 
-    const handleTimelineClick = (start) => {
-        if (clipboard) {
-            pasteClipboard(start);
-            return;
-        }
-        setModalDefaultDate(start);
-        setEditingEvent(null);
-        setIsAddModalOpen(true);
-    };
-
-    const openAddModal = () => {
-        setModalDefaultDate(new Date());
-        setEditingEvent(null);
-        setIsAddModalOpen(true);
-    };
-
-    const handleEditEvent = (event) => {
-        setEditingEvent(event);
-        setIsAddModalOpen(true);
-    };
-
-    const toggleLanguage = () => {
-        const newLang = i18n.language === 'en' ? 'zh' : 'en';
-        i18n.changeLanguage(newLang);
-    };
-
-    const handlePrint = () => {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        let maxDate = new Date(today);
-        if (events.length > 0) {
-            const lastEventDate = events.reduce((max, e) => e.end > max ? e.end : max, new Date(0));
-            if (lastEventDate > maxDate) maxDate = new Date(lastEventDate);
-        }
-        maxDate.setDate(maxDate.getDate() + 7);
-        const printStart = new Date(today);
-        printStart.setDate(printStart.getDate() - 1);
-        setViewRange({ start: printStart, end: maxDate });
-        setTimeout(() => window.print(), 500);
-    };
-
-    const handleExport = () => {
-        const dataStr = JSON.stringify(events, null, 2);
-        const blob = new Blob([dataStr], { type: "application/json" });
+    const handleExportJson = () => {
+        const payload = JSON.stringify(documents.map((entry) => entry.calendar), null, 2);
+        const blob = new Blob([payload], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
+        const link = document.createElement('a');
         link.href = url;
-        link.download = "tplanner-data.json";
+        link.download = 'tplanner-jcal.json';
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+        URL.revokeObjectURL(url);
     };
 
-    const handleImport = async (e) => {
-        const file = e.target.files[0];
-        if (!file || !db) return;
-        const reader = new FileReader();
-        reader.onload = async (ev) => {
-            try {
-                const parsed = JSON.parse(ev.target.result);
-                if (Array.isArray(parsed)) {
-                    const allDocs = await db.events.find().exec();
-                    await Promise.all(allDocs.map(d => d.remove()));
-                    const upserts = recoverLegacySeries(parsed).map(event => {
-                        const cleanUpdate = { ...event };
-                        cleanUpdate.start = new Date(cleanUpdate.start).toISOString();
-                        cleanUpdate.end = new Date(cleanUpdate.end).toISOString();
-                        cleanUpdate.updatedAt = clockNow();
-                        if (!cleanUpdate.note) cleanUpdate.note = "";
-                        if (!cleanUpdate.timezone) cleanUpdate.timezone = "";
-                        if (cleanUpdate.completed === undefined) cleanUpdate.completed = false;
-                        if (cleanUpdate.checklist === undefined) cleanUpdate.checklist = [];
-                        if (!cleanUpdate.recurrenceType) cleanUpdate.recurrenceType = "none";
-                        if (!cleanUpdate.recurrenceCount) cleanUpdate.recurrenceCount = 1;
-                        return toDatabaseEvent(cleanUpdate);
-                    });
-                    await db.events.bulkUpsert(upserts);
-                    requestUnitSync('events');
-                    const today = new Date();
-                    setViewRange(createViewRange(today));
-                    alert(t('messages.importSuccess'));
-                } else {
-                    alert(t('messages.importError'));
-                }
-            } catch (err) {
-                console.error(err);
-                alert(t('messages.parseError'));
-            }
-        };
-        reader.readAsText(file);
+    const toggleLanguage = () => {
+        i18n.changeLanguage(i18n.language === 'en' ? 'zh' : 'en');
+    };
+
+    const openAdd = (startValue = undefined, dayKey = null) => {
+        setEditor({ open: true, row: null, dayKey, defaultDate: startValue ?? null });
+    };
+
+    const openEditor = (row) => setEditor({ open: true, row, dayKey: null, defaultDate: null });
+
+    const handleTodayButton = () => {
+        const now = new Date();
+        setMode('date');
+        setDateMode('timeline');
+        setViewRange(calculateTimelineRange(scheduled, now));
+        highlightRange({ type: 'today', start: new Date(now.setHours(0, 0, 0, 0)), end: new Date(now.setHours(23, 59, 59, 999)) });
     };
 
     return (
-        <div className="app-container" style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--clr-bg)', overflow: 'hidden', cursor: clipboard ? 'crosshair' : undefined }}>
-
-            {/* Custom Title Bar (Electron only) */}
+        <div className="app-container" style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--clr-bg)', overflow: 'hidden' }}>
             {isElectron && <TitleBar />}
 
             <header className="app-header">
                 <div className="app-header-left">
-                    {/* App title — only show if NOT in electron (TitleBar already shows it) */}
-                    {!isElectron && (
-                        <h1 className="app-header-title">{t('app.title')}</h1>
-                    )}
-
-                    {/* Today button */}
-                    <button onClick={handleToday} className="btn btn--ghost" id="btn-today">
-                        {t('nav.today')}
+                    {!isElectron && <h1 className="app-header-title">{t('app.title')}</h1>}
+                    <button onClick={handleTodayButton} className="btn btn--ghost" id="btn-today">{t('nav.today')}</button>
+                    {VIEWS.filter((id) => id !== 'today').map((id) => (
+                        <button
+                            key={id}
+                            onClick={() => setMode(id)}
+                            className={`btn ${mode === id ? 'btn--primary' : 'btn--ghost'}`}
+                            id={`btn-view-${id}`}
+                        >
+                            {id === 'inbox' ? t('nav.inbox') : t('nav.dateView')}
+                        </button>
+                    ))}
+                    <button
+                        onClick={() => setMode('today')}
+                        className={`btn ${mode === 'today' ? 'btn--primary' : 'btn--ghost'}`}
+                        id="btn-view-today"
+                    >
+                        {t('task.today')}
                     </button>
+                    {mode === 'date' && (
+                        <button
+                            className="btn btn--ghost"
+                            id="btn-toggle-date-mode"
+                            title={t('nav.switchLayout')}
+                            onClick={() => setDateMode(dateMode === 'timeline' ? 'list' : 'timeline')}
+                        >
+                            {dateMode === 'timeline' ? <LayoutList size={13} /> : <CalendarDays size={13} />}
+                        </button>
+                    )}
                 </div>
 
                 <div className="app-header-right">
-                    {/* Timezone selector */}
                     <div className="tz-select-wrap" title={t('app.displayTimezone')}>
-                        <Globe size={13} />
-                        <select
-                            value={travelTimezone}
-                            onChange={handleTimezoneChange}
-                            className="tz-select"
-                            id="tz-select"
-                        >
-                            {TIMEZONES.map(tz => (
-                                <option key={tz.value} value={tz.value}>
-                                    {t(`timezones.${tz.value ? tz.value.replace('/', '_') : 'default'}`, tz.label)}
+                        <CalendarDays size={13} />
+                        <select value={travelTimezone} onChange={handleTimezoneChange} className="tz-select" id="tz-select">
+                            {TIMEZONES.map((zone) => (
+                                <option key={zone.value} value={zone.value}>
+                                    {t(`timezones.${zone.value ? zone.value.replace('/', '_') : 'default'}`, zone.label)}
                                 </option>
                             ))}
                         </select>
                     </div>
 
-                    {/* Language toggle */}
-                    <button
-                        onClick={toggleLanguage}
-                        className="btn btn--ghost"
-                        title={t('app.switchLanguage')}
-                        id="btn-lang"
-                    >
+                    <button onClick={toggleLanguage} className="btn btn--ghost" title={t('app.switchLanguage')} id="btn-lang">
                         <Languages size={13} />
                         {i18n.language === 'en' ? '中文' : 'EN'}
                     </button>
 
-                    {/* Print */}
-                    <button
-                        onClick={handlePrint}
-                        className="btn btn--ghost"
-                        title={t('app.printCalendar')}
-                        id="btn-print"
-                    >
+                    <button onClick={() => window.print()} className="btn btn--ghost" title={t('app.printCalendar')} id="btn-print">
                         <Printer size={13} />
                     </button>
 
-                    {/* Export */}
-                    <button
-                        onClick={handleExport}
-                        className="btn btn--ghost"
-                        title={t('actions.export')}
-                        id="btn-export"
-                    >
+                    <button onClick={handleExportIcs} className="btn btn--ghost" title={t('actions.exportIcs')} id="btn-export-ics">
                         <Download size={13} />
                     </button>
 
-                    {/* Import — Electron only (security: no local file upload in web) */}
-                    {isElectron && (
-                        <label
-                            className="btn btn--ghost"
-                            title={t('actions.import')}
-                            style={{ cursor: 'pointer' }}
-                            id="btn-import-label"
-                        >
-                            <Upload size={13} />
-                            <input
-                                type="file"
-                                accept=".json"
-                                style={{ display: 'none' }}
-                                onChange={handleImport}
-                                id="btn-import"
-                            />
-                        </label>
-                    )}
+                    <button onClick={handleExportJson} className="btn btn--ghost" title={t('actions.exportBackup')} id="btn-export-json">
+                        <FileText size={13} />
+                    </button>
 
-                    {/* Zoom Control */}
                     <ZoomControl />
 
-                    {/* LAN Sync — 适配器驱动 */}
-                    {isElectron  && (
-                        <LanSync
-                            syncRequest={syncRequest}
-                            adapters={[
-                                {
-                                    type: 'events',
-                                    _getLocal: async () => {
-                                        if (!db) return eventsRef.current;
-                                        const docs = await db.events.find().exec();
-                                        return hydrateEventDocuments(docs);
-                                    },
-                                    _writeLocal: async (merged) => {
-                                        if (!db) return;
-                                        // 持久化边界:UI projection 里的 Date 必须在写入 RxDB 前
-                                        // 序列化回 schema 形状(ISO string / 时间戳),否则
-                                        // IndexedDB 里会被写入 Date 对象污染投影。
-                                        const persisted = recoverLegacySeries(merged).map(toDatabaseEvent);
-                                        try { await db.events.bulkUpsert(persisted); } catch (err) { console.error('LAN snapshot apply failed', err); }
-                                    },
-                                },
-                                {
-                                    type: 'journals',
-                                    _getLocal: () => journalsRef.current,
-                                    _writeLocal: (merged) => {
-                                        const normalized = normalizeJournals(merged);
-                                        journalsRef.current = normalized;
-                                        setJournals(normalized);
-                                        if (isElectron && window.electronAPI?.saveAllJournals) {
-                                            window.electronAPI.saveAllJournals(normalized);
-                                        } else {
-                                            Object.entries(normalized).forEach(([date, entry]) => {
-                                                localStorage.setItem(`tplanner_journal_${date}`, JSON.stringify(entry));
-                                            });
-                                        }
-                                    },
-                                },
-                            ]}
-                        />
-                    )}
+                    <LanSync sync={sync} onOpenRecord={(uid) => setSelectedUid(uid)} />
 
-                    {/* Add Event */}
-                    <button
-                        onClick={openAddModal}
-                        className="btn btn--primary"
-                        id="btn-add-event"
-                    >
+                    <button className="btn btn--ghost" id="btn-signout" title={t('app.signOut')} onClick={onSignOut}>
+                        <LogOut size={13} />
+                    </button>
+
+                    <button onClick={() => openAdd()} className="btn btn--primary" id="btn-add-task">
                         <Plus size={13} />
-                        {t('actions.addEvent')}
+                        {t('actions.addTask')}
                     </button>
                 </div>
             </header>
 
-            {/* Main Content */}
             <main style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '12px', minHeight: 0, gap: '8px' }}>
                 <div className="calendar-banners">
                     <ReminderBanner
-                        events={visibleEvents}
+                        events={view.tasks}
                         travelTimezone={travelTimezone}
-                        onHighlight={(h) => {
-                            setHighlight(h);
-                            handleJumpToDate(h.start);
-                            setTimeout(() => setHighlight(null), 3000);
-                        }}
+                        onHighlight={(range) => { highlightRange(range); setMode('date'); setDateMode('timeline'); }}
                     />
                     <OverdueBanner
-                        events={visibleEvents}
+                        events={view.tasks}
                         travelTimezone={travelTimezone}
-                        onHighlight={(h) => {
-                            setHighlight(h);
-                            if (h.type === 'overdue') handleJumpToDate(h.start);
-                            setTimeout(() => setHighlight(null), 3000);
-                        }}
+                        onHighlight={(range) => { highlightRange(range); setSelectedUid(rowsOnDay(view.tasks, format(range.start, 'yyyy-MM-dd'))[0]?.uid ?? null); }}
                     />
                     <ClashBanner
                         clashes={clashes}
-                        events={visibleEvents}
+                        events={view.tasks}
                         travelTimezone={travelTimezone}
-                        onHighlight={(h) => {
-                            setHighlight(h);
-                            if (h.type === 'clash') handleJumpToDate(h.start);
-                            setTimeout(() => setHighlight(null), 3000);
-                        }}
+                        onHighlight={(range) => { highlightRange(range); setMode('date'); setDateMode('timeline'); }}
                     />
                 </div>
-                <Timeline
+
+                {mode === 'date' && dateMode === 'timeline' ? (
+                    <Timeline
                         startDate={viewRange.start}
                         endDate={viewRange.end}
-                        events={visibleEvents}
+                        events={scheduled}
                         clashes={clashes}
-                        onEventClick={(ev) => { setSelectedEvent(ev); setSelectedIds(new Set()); }}
-                        onAddEvent={handleTimelineClick}
                         highlight={highlight}
-                        onLoadPrev={handleLoadMorePrev}
-                        onLoadNext={handleLoadMoreNext}
-                        onUpdateEvent={handleSaveEvent}
-                        onToggleTaskComplete={handleToggleTaskComplete}
-                        onContextMenu={(e, ev) => setContextMenu({ x: e.clientX, y: e.clientY, event: ev })}
                         travelTimezone={travelTimezone}
-                        journals={visibleJournals}
-                        onSaveJournal={handleSaveJournal}
-                        selectedIds={selectedIds}
-                        onSelectionChange={setSelectedIds}
-                />
+                        journals={journals}
+                        onEventClick={(row) => setSelectedUid(row.uid)}
+                        onAddEvent={(start) => openAdd(start)}
+                        onUpdateEvent={handleTimelineUpdate}
+                        onToggleTaskComplete={(id, completed) => {
+                            const row = view.tasks.find((item) => item.uid === id);
+                            if (row) handleToggleComplete(row, completed);
+                        }}
+                        onSaveJournal={handleSaveNote}
+                        onContextMenu={(event, row) => setContextMenu({ x: event.clientX, y: event.clientY, row })
+                        }
+                        onLoadPrev={() => setViewRange((previous) => ({ ...previous, start: new Date(previous.start.getTime() - 14 * 86400000) }))}
+                        onLoadNext={() => setViewRange((previous) => ({ ...previous, end: new Date(previous.end.getTime() + 14 * 86400000) }))}
+                        selectedIds={new Set()}
+                        onSelectionChange={() => {}}
+                    />
+                ) : (
+                    <div className="task-list-scroll">
+                        <TaskList
+                            mode={mode === 'today' ? 'today' : mode === 'inbox' ? 'inbox' : 'date'}
+                            todayRows={view.today}
+                            inboxRows={view.inbox}
+                            dateGroups={view.dated.groups}
+                            noteByDay={view.notes}
+                            timeZone={travelTimezone}
+                            onOpen={(row) => setSelectedUid(row.uid)}
+                            onToggleComplete={handleToggleComplete}
+                            onToggleChecklist={handleToggleChecklist}
+                            onSaveNote={handleSaveNote}
+                            onContextMenu={(event, row) => setContextMenu({ x: event.clientX, y: event.clientY, row })}
+                        />
+                    </div>
+                )}
             </main>
 
             <AddEventModal
-                isOpen={isAddModalOpen}
-                onClose={() => { setIsAddModalOpen(false); setEditingEvent(null); }}
-                onSave={handleSaveEvent}
-                defaultDate={modalDefaultDate}
-                initialEvent={editingEvent}
-                events={events}
+                isOpen={editor.open}
+                onClose={() => setEditor(CLOSED_EDITOR)}
+                onSave={saveDocument}
+                defaultDate={editor.defaultDate}
+                initialEvent={editor.row}
+                events={view.tasks}
             />
 
             <EventDetailsModal
-                event={selectedEvent}
+                event={selectedRow}
                 travelTimezone={travelTimezone}
-                onClose={() => setSelectedEvent(null)}
-                onDelete={handleDeleteEvent}
-                onEdit={handleEditEvent}
-                onSave={handleSaveEvent}
+                onClose={() => setSelectedUid(null)}
+                onDelete={(row) => handleDelete(row)}
+                onEdit={openEditor}
+                onSave={handleDetailsSave}
             />
 
-            {/* Debug panel — Electron only; browser has F12 */}
             {isElectron && <DebugPanel />}
 
-            {/* Paste mode toast */}
-            {clipboard && (
-                <div style={{
-                    position: 'fixed', bottom: 60, left: '50%', transform: 'translateX(-50%)',
-                    zIndex: 9000, background: 'var(--clr-surface)',
-                    border: '1px solid var(--clr-gold)', borderRadius: 8,
-                    padding: '10px 18px', display: 'flex', alignItems: 'center', gap: 12,
-                    boxShadow: 'var(--tp-shadow-dialog)',
-                    fontFamily: 'var(--font-mono)', fontSize: 12,
-                }}>
-                    <span style={{ color: 'var(--clr-gold)' }}>{t('paste.copied')}</span>
-                    <span style={{ color: 'var(--clr-text)' }}>「{clipboard.title}」</span>
-                    <span style={{ color: 'var(--clr-text-dim)' }}>{t('paste.hint')}</span>
-                    <button onClick={() => setClipboard(null)}
-                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--clr-text-dim)', padding: 0, marginLeft: 4, display: 'flex', alignItems: 'center' }}
-                        title={t('paste.cancel')}
-                    ><X size={14} /></button>
-                </div>
-            )}
+            {notice && <div className="app-toast" role="status">{notice}</div>}
 
-            {/* Box-selection batch toolbar */}
-            {selectedIds.size > 0 && (
-                <div style={{
-                    position: 'fixed', bottom: 60, left: '50%', transform: 'translateX(-50%)',
-                    zIndex: 9000, background: 'var(--clr-surface)',
-                    border: '1px solid var(--clr-gold)', borderRadius: 8,
-                    padding: '10px 18px', display: 'flex', alignItems: 'center', gap: 12,
-                    boxShadow: 'var(--tp-shadow-dialog)',
-                    fontFamily: 'var(--font-mono)', fontSize: 12,
-                }}>
-                    <span style={{ color: 'var(--clr-gold)' }}>{t('selection.count', { count: selectedIds.size })}</span>
-                    <button
-                        onClick={() => handleBatchDelete(Array.from(selectedIds))}
-                        style={{
-                            background: 'none', border: '1px solid var(--clr-red)', borderRadius: 4,
-                            cursor: 'pointer', color: 'var(--clr-red)', padding: '3px 10px', fontSize: 12,
-                        }}
-                    >
-                        {t('selection.delete')}
-                    </button>
-                    <button onClick={() => setSelectedIds(new Set())}
-                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--clr-text-dim)', padding: 0, marginLeft: 4, display: 'flex', alignItems: 'center' }}
-                        title={t('selection.cancel')}
-                    ><X size={14} /></button>
-                </div>
+            {isElectron && (
+                <button
+                    className="btn btn--ghost"
+                    style={{ position: 'fixed', right: 12, bottom: 12, zIndex: 8000 }}
+                    title={t('app.todayWidget')}
+                    onClick={() => showTodayWidget()}
+                >
+                    {t('app.todayWidget')}
+                </button>
             )}
 
             {contextMenu && (
                 <ContextMenu
                     x={contextMenu.x}
                     y={contextMenu.y}
-                    event={contextMenu.event}
+                    row={contextMenu.row}
                     onClose={() => setContextMenu(null)}
-                    onCopy={handleCopyEvent}
-                    onDelete={(ev) => handleDeleteEvent(ev.id, 'single', ev)}
+                    onCopy={handleDuplicate}
+                    onDelete={handleDelete}
                 />
             )}
         </div>
-    )
+    );
 }
 
-function App() {
-    const isElectron = typeof window !== 'undefined' && !!window.electronAPI
-    const [authState, setAuthState] = useState(() => {
-        if (isElectron) return 'authenticated'
-        return webApi.hasStoredWebAuth() ? 'checking' : 'unauthenticated'
-    })
+export default function App() {
+    // A stored session is reused immediately: local durability must never depend on the
+    // server being reachable at startup (docs/sync-v5.md).
+    const [session, setSession] = useState(storedSession);
 
-    useEffect(() => {
-        if (isElectron || authState !== 'checking') return
-
-        let active = true
-        webApi.restoreWebAuth()
-            .then(authenticated => {
-                if (active) setAuthState(authenticated ? 'authenticated' : 'unauthenticated')
-            })
-            .catch(() => {
-                webApi.clearWebAuth()
-                if (active) setAuthState('unauthenticated')
-            })
-
-        return () => { active = false }
-    }, [authState, isElectron])
-
-    const handleWebLogin = async ({ account, password, remember }) => {
-        const authenticated = await webApi.authenticateWeb(account, password, remember)
-        if (authenticated) setAuthState('authenticated')
-        return authenticated
+    if (!session) {
+        return <LoginScreen onConnected={setSession} onLogout={undefined} />;
     }
 
-    if (isElectron) return <PlannerApp />
-
-    if (authState === 'checking') {
-        return <div className="web-auth-loading" role="status">正在验证安全会话…</div>
-    }
-
-    if (authState !== 'authenticated') {
-        return <LoginScreen onLogin={handleWebLogin} />
-    }
-
-    return <PlannerApp />
+    return (
+        <PlannerApp
+            session={session}
+            onSignOut={() => { clearSession(); setSession(null); }}
+        />
+    );
 }
-
-export default App;

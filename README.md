@@ -1,28 +1,44 @@
 # tPlanner Desktop + Web
 
-`master` 只承载桌面端、Web 前端与共享 Sync V3 协议。Android/Wear 在
-`mobile_andorid`，中央服务在 `sync_server`；三个分支共用协议目录
-`sync-v3/protocol/v3`，CI 要求其内容逐字节一致。
+`master` 只承载桌面端、Web 前端与共享 Sync V5 协议核心。Android/Wear 在
+`mobile_andorid`，中央服务在 `sync_server`；三个分支共用
+`sync-v5/`（`jcal.mjs`、`ics.mjs`、`protocol/v5/*.schema.json`），CI 要求其内容逐字节一致。
 
-当前统一发布号：**8.0.0**（Sync V3 全量切换）。
+## 同步架构（Sync V5）
 
-## 同步架构
+**本机持久化的事实单元就是 RFC 7265 jCal 文档本身**（`sync-v5/jcal.mjs`）。
+没有第二套 Task/Event 模型：UI 读的是「服务器镜像 + 仍未确认的本地文档」这一个投影
+（`src/syncV5/store.js` 的 `project()`），编辑走 `JcalDocument.with*()` 写回同一个数组。
 
-客户端只执行单向 V3 流程：本地操作写入 semantic-command outbox，中央单写者排序并生成不可变快照，客户端原子安装 Server Mirror 后重放仍未确认的 pending 命令。客户端不再进行三方合并，也不再读写 V1 dataset 路由。
+客户端只做三件事：
 
-桌面/Web 的冷启动、长轮询通知和手动同步共用同一个安装回调：新快照先完成
-哈希校验与原子持久化，再把同一个 displayed mirror 写入 Electron/Web 数据适配器并刷新
-当前 UI；远端通知不能只更新 IndexedDB 而留下屏幕旧数据。终态 receipt 只有在其
-`brokerSequence` 已被对应快照覆盖后才会从 pending overlay 移除。
+1. `save`：把未改动的 jCal 文档与出站操作一起落盘（IndexedDB `tplanner-v5`），
+   落盘完成后才向 UI 报告保存成功。
+2. `flush`：任何时候只有一个不可变的 in-flight 命令；传输结果不确定时用相同的
+   `commandId` 与 `sequence` 重试同一份字节。未发送的同一 UID 编辑会合并为一条命令。
+3. `pull`：前台/手动刷新与有界周期刷新都拉取完整快照，并在单个事务内原子安装。
+
+冲突与拒绝（`conflict` / `rejected`）会连同本地文档一起保留，提供明确的
+**放弃 / 重新提交** 两个动作；`serverId` 变化或修订号回退只会给出显式的
+「重置连接」选择，绝不静默覆盖本机状态。没有 delta 编解码、没有长轮询、
+没有通知通道、没有 V3/V4 端点或兼容读取器。
 
 生产地址：
 
 - Web：`https://plan.hamhuo.top`
-- Sync V3：`https://sync.hamhuo.top/tplanner/v3`
+- Sync V5：`https://sync.hamhuo.top/tplanner/v5`
 
 Web 生产站由 Caddy 独立提供 `/srv/tplanner-web/current` 静态文件，并只把
-`/tplanner/*` 反代到本机 V3 API。部署 Web 不复制服务器代码，也不重启
-Sync API、NATS 或 State Builder。
+`/tplanner/*` 反代到本机 API。部署 Web 不复制服务器代码。
+
+## 目录
+
+- `sync-v5/` — 冻结的三端共享契约（jCal 文档核心、ICS 导出、协议 JSON Schema）。
+- `src/syncV5/` — 客户端同步：`store.js`（持久化与投影）、`transport.js`（两个 HTTP 调用）、
+  `sync.js`（引擎）、`session.js`（地址与令牌）、`document.js`（只读 jCal 解释 + 视图分组）、
+  `ics.js`（走 `sync-v5/ics.mjs` 的导出）、`platform.js`（Electron 外壳边界）。
+- `electron/` — 纯外壳：窗口、托盘、便签窗口。主进程不保存任务模型，只接收渲染进程推送的
+  只读投影，并把便签交互作为 intent 回传。
 
 ## 本地开发
 
@@ -33,7 +49,8 @@ npm run build
 ```
 
 Vite 开发服务器把 `/tplanner` 代理到 `TPLANNER_SYNC_PROXY_TARGET`（默认
-`https://sync.hamhuo.top`）。若要让浏览器直接跨源访问另一套 V3 服务，构建时设置 `VITE_SYNC_SERVER_URL`。
+`https://sync.hamhuo.top`）。服务器地址与访问令牌在登录页配置，保存在本机，
+令牌只以 `Authorization` 头发出。
 
 ## Web 部署
 
@@ -47,6 +64,7 @@ npm run deploy:web
 
 ## 分支边界
 
-- 本分支不包含或部署 `sync-server/`。
-- 禁止重新引入 `/tplanner/events`、`/journals`、`/changes` 等 V1 路由。
-- 新业务字段必须同时进入 command、中央 reducer、snapshot、三端 mapper 与 round-trip 测试；不支持的字段必须保留，不能由同步清空。
+- 本分支不包含或部署 `sync-server/`，也不再包含 `src/syncV3/` 或 `sync-v3/`。
+- 禁止重新引入 `/tplanner/v3`、`/tplanner/events`、`/journals`、`/changes` 等路由。
+- 任务事实只能存在于规范 jCal 文档里：不得在传输元数据、SQL 列、适配器或第二个可变
+  Task 模型中重复；未知的标准/扩展属性必须原样保留。

@@ -1,5 +1,5 @@
 import { format, areIntervalsOverlapping, max, min, addMinutes } from 'date-fns';
-import { fromZonedTime, formatInTimeZone } from 'date-fns-tz';
+import { fromZonedTime } from 'date-fns-tz';
 import EventBlock from './EventBlock';
 import { MarkdownPreview } from './NoteEditor';
 import { useTranslation } from 'react-i18next';
@@ -7,7 +7,7 @@ import { getDateLocale } from '../utils/dateLocale';
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { marked } from 'marked';
 import { assignOverlapGroupLanes, computeCascadeLayout } from '../utils/laneLayout';
-import { categoryForId, timeline } from '../design-system';
+import { timeline } from '../design-system';
 
 export default function EventRow({ date, events, onEventClick, onAddEvent, highlight, onDragStart, dragState, clashes, displayTimezone, onToggleTaskComplete, journalText, onContextMenu, selectedIds }) {
     const { t, i18n } = useTranslation();
@@ -21,47 +21,22 @@ export default function EventRow({ date, events, onEventClick, onAddEvent, highl
     const dayStart = fromZonedTime(`${dateStr}T00:00:00`, tz);
     const dayEnd   = fromZonedTime(`${dateStr}T23:59:59.999`, tz);
 
-    const dayEventsRaw  = events.filter(e => areIntervalsOverlapping({ start: e.start, end: e.end }, { start: dayStart, end: dayEnd }));
-    const statusEvents  = dayEventsRaw.filter(e => e.type === 'status');
-    const regularEvents = dayEventsRaw.filter(e => e.type !== 'status');
+    // Only records with an instant land on the time axis. A record with no DTSTART/DUE has
+    // no position here and is deliberately absent rather than drawn at midnight.
+    const dayEventsRaw = events.filter(e => e.start instanceof Date && !Number.isNaN(e.start.getTime())
+        && areIntervalsOverlapping({ start: e.start, end: e.end }, { start: dayStart, end: dayEnd }));
 
-    // Clamp & sort regular events
-    const processedRegularEvents = regularEvents.map(e => ({
+    // Clamp & sort
+    const processedRegularEvents = dayEventsRaw.map(e => ({
         ...e, originalStart: e.start, originalEnd: e.end,
         start: max([e.start, dayStart]), end: min([e.end, dayEnd])
     })).sort((a, b) => a.start - b.start);
 
-    // Status events — row stacking
-    const processedStatusEvents = statusEvents.map(e => ({
-        ...e, start: max([e.start, dayStart]), end: min([e.end, dayEnd])
-    })).sort((a, b) => a.start - b.start);
-
-    const statusRows = [];
-    const finalStatusEvents = processedStatusEvents.map(ev => {
-        let rowIndex = 0;
-        while (true) {
-            const row = statusRows[rowIndex] || [];
-            const collision = row.find(existing =>
-                areIntervalsOverlapping({ start: existing.start, end: existing.end }, { start: ev.start, end: ev.end })
-            );
-            if (!collision) {
-                if (!statusRows[rowIndex]) statusRows[rowIndex] = [];
-                statusRows[rowIndex].push(ev);
-                break;
-            }
-            rowIndex++;
-        }
-        return { ...ev, rowIndex };
-    });
-
     // ── Lane assignment ───────────────────────────────────────────────────
-    // Reminders and completed tasks do NOT participate in lane assignment:
-    // - Reminders have no time-conflict semantics, so they must not force
-    //   unrelated events into extra lanes.
-    // - Completed tasks are rendered as background "shadows".
-    const reminderEvents  = processedRegularEvents.filter(e =>   e.type === 'reminder');
-    const completedTasks  = processedRegularEvents.filter(e =>   e.type === 'task' && e.completed);
-    const activeEvents    = processedRegularEvents.filter(e =>   e.type !== 'reminder' && !(e.type === 'task' && e.completed));
+    // Completed tasks are rendered as background "shadows": history stays visible without
+    // pretending to still occupy the day's schedule.
+    const completedTasks  = processedRegularEvents.filter(e => e.completed);
+    const activeEvents    = processedRegularEvents.filter(e => !e.completed);
 
     // ── Cascade geometry (TPlanner's rotated Google algorithm) ─────────────
     // Columns are LOCAL to overlap groups, and the conflict axis is vertical:
@@ -78,14 +53,10 @@ export default function EventRow({ date, events, onEventClick, onAddEvent, highl
         tokens: timeline,
     });
 
-    // Status strip is sized by its rows in px. The old fixed 15% container
-    // with px children (16px rows on an 18px pitch) could overflow into the
-    // event area — px row count owns the height now.
-    const statusRowCount = statusRows.length;
-    const statusStripPx = statusRowCount > 0
-        ? statusRowCount * (timeline.statusRowHeight + timeline.statusRowGap) + timeline.statusStripGap
-        : 0;
-    const rowHeightPx = statusStripPx + eventAreaHeight;
+    // V5 has no background "status band" record kind, so there is no top strip: the event
+    // area owns the whole row height.
+    const statusStripPx = 0;
+    const rowHeightPx = eventAreaHeight;
 
     const finalRegularEvents = [
         // Active events (no reminders) in their cascade columns
@@ -103,15 +74,6 @@ export default function EventRow({ date, events, onEventClick, onAddEvent, highl
         ...completedTasks.map(ev => ({
             ...ev,
             isShadow: true,
-            laneIdx:       0,
-            isConflicting: false,
-            laneTopPx:    statusStripPx + timeline.eventGap,
-            laneHeightPx: eventAreaHeight - 2 * timeline.eventGap,
-        })),
-        // Reminders — fixed position, never conflicting, never affect columns
-        ...reminderEvents.map(ev => ({
-            ...ev,
-            isShadow: false,
             laneIdx:       0,
             isConflicting: false,
             laneTopPx:    statusStripPx + timeline.eventGap,
@@ -206,58 +168,6 @@ export default function EventRow({ date, events, onEventClick, onAddEvent, highl
 
             {/* Grid */}
             <div className="event-row-grid" onClick={handleGridClick}>
-                {/* Status events (top strip) */}
-                {statusEvents.length > 0 && (
-                    <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: `${statusRowCount * (timeline.statusRowHeight + timeline.statusRowGap)}px`, zIndex: 30, pointerEvents: 'none' }}>
-                        {finalStatusEvents.map(ev => {
-                            const tzInner = displayTimezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-                            const toMins = str => { const [h, m] = str.split(':').map(Number); return h * 60 + m; };
-                            let startMins, endMins;
-                            try {
-                                startMins = toMins(formatInTimeZone(ev.start, tzInner, 'HH:mm'));
-                                endMins   = toMins(formatInTimeZone(ev.end,   tzInner, 'HH:mm'));
-                                if (endMins < startMins) endMins += 1440;
-                                if (endMins - startMins < 15) endMins = startMins + 15;
-                            } catch {
-                                startMins = ev.start.getHours() * 60 + ev.start.getMinutes();
-                                endMins   = ev.end.getHours()   * 60 + ev.end.getMinutes();
-                            }
-                            const left  = (startMins / 1440) * 100;
-                            const width = ((endMins - startMins) / 1440) * 100;
-                            const category = categoryForId(ev.colorId);
-                            return (
-                                <div key={ev.id} className="timeline-status-block"
-                                    style={{
-                                        position:        'absolute',
-                                        backgroundColor: category.background,
-                                        color: category.foreground,
-                                        left: `${left}%`, width: `${width}%`,
-                                        top: `${ev.rowIndex * (timeline.statusRowHeight + timeline.statusRowGap)}px`, height: `${timeline.statusRowHeight}px`,
-                                        borderColor:     category.border,
-                                        overflow:        'hidden',
-                                        paddingLeft:     5,
-                                        paddingRight:    4,
-                                        // Vertically center the text inside the 16px strip
-                                        display:         'flex',
-                                        alignItems:      'center',
-                                        pointerEvents:   'auto',
-                                        cursor:          'pointer',
-                                    }}
-                                    onClick={e => { e.stopPropagation(); onEventClick(events.find(o => o.id === ev.id) || ev); }}
-                                >
-                                    <span className="timeline-status-title" style={{
-                                        whiteSpace:    'nowrap',
-                                        overflow:      'hidden',
-                                        textOverflow:  'ellipsis',
-                                    }}>
-                                        {ev.title}
-                                    </span>
-                                </div>
-                            );
-
-                        })}
-                    </div>
-                )}
 
                 {/* Hour lines */}
                 {Array.from({ length: 24 }).map((_, i) => (

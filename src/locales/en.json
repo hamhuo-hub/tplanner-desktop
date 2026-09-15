@@ -3,12 +3,18 @@
         "title": "tPlanner",
         "switchLanguage": "Switch Language",
         "printCalendar": "Print Calendar",
-        "displayTimezone": "Display Timezone"
+        "displayTimezone": "Display Timezone",
+        "todayWidget": "Today widget",
+        "signOut": "Sign out"
     },
     "nav": {
         "prev": "Prev 2M",
         "today": "Today",
-        "next": "Next 2M"
+        "next": "Next 2M",
+        "inbox": "Inbox",
+        "date": "Dates",
+        "dateView": "Dates",
+        "switchLayout": "Switch list / timeline"
     },
     "actions": {
         "export": "Export",
@@ -27,15 +33,27 @@
         "confirm": "Confirm",
         "merge": "Merge",
         "done": "Done",
-        "syncNow": "Sync Now"
+        "syncNow": "Sync Now",
+        "addTask": "Add Task",
+        "addNote": "Add Note",
+        "exportIcs": "Export ICS",
+        "exportBackup": "Export jCal backup"
     },
     "recurrence": {
         "none": "None",
         "daily": "Daily",
         "weekly": "Weekly",
         "monthly": "Monthly",
-        "count": "Repeat Count",
-        "max": "(Max 50)"
+        "count": "Occurrences",
+        "countHint": "0 means no limit",
+        "exceptions": "{{count}} exception(s)",
+        "occurrences": "times",
+        "member": "occurrence {{index}}",
+        "setRepeat": "Set repeat",
+        "editSeries": "Edit repeating series",
+        "deleteWholeSeries": "This is a repeating task: the whole record and its exceptions are deleted.",
+        "unsupportedRule": "This task uses a newer recurrence rule: a normal edit preserves it, and only choosing None or another rule rewrites it.",
+        "unsupportedPreserved": "The editor offers daily/weekly/monthly only; other rules are preserved as they are."
     },
     "event": {
         "title": "Title",
@@ -51,21 +69,19 @@
         "details": "Event Details",
         "timeLabel": "Time",
         "notePlaceholder": "Type your detailed notes here...",
-        "typeReminder": "Reminder",
-        "typeEvent": "Reminder",
-        "typeStatus": "Status",
-        "typeTask": "Task",
         "checklist": "Checklist",
         "checklistItem": "Item...",
         "recurrence": "Repeat",
         "allDay": "All Day",
         "originalTz": "Original:",
         "copySuffix": " (Copy)",
-        "subtaskBlocked": "Complete subtasks first ({{done}}/{{total}})"
-    },
-    "reminder": {
-        "upcoming": "Upcoming Reminders",
-        "ongoing": "Ongoing"
+        "subtaskBlocked": "Complete subtasks first ({{done}}/{{total}})",
+        "scheduled": "Scheduled",
+        "dateOnly": "Date only",
+        "noTimeHint": "A task without a time only appears in the Inbox; no date is invented for it.",
+        "titleRequired": "Please enter a title",
+        "startRequired": "Please pick a start time",
+        "invalidDates": "The end must be later than the start"
     },
     "timezones": {
         "default": "Beijing Time (Default)",
@@ -79,6 +95,10 @@
         "Pacific_Auckland": "Auckland (NZST/NZDT)"
     },
     "task": {
+        "today": "Today",
+        "inbox": "Inbox",
+        "noTime": "No time",
+        "empty": "Nothing here yet.",
         "overdueDetected": "Overdue Tasks",
         "overdue": "Overdue",
         "upcoming": "Upcoming Deadlines",
@@ -95,25 +115,9 @@
         "copy": "Duplicate",
         "delete": "Delete"
     },
-    "clash": {
-        "detected": "Schedule Conflict Detected",
-        "message": "You have {{count}} overlap in your schedule.",
-        "message_plural": "You have {{count}} overlaps in your schedule.",
-        "jump": "Jump to",
-        "unknown": "Unknown"
-    },
-    "timeline": {
-        "localTime": "Local Time",
-        "localTimeShort": "LOCAL"
-    },
     "selection": {
         "count": "{{count}} selected",
         "delete": "Delete Selected",
-        "cancel": "Cancel (Esc)"
-    },
-    "paste": {
-        "copied": "Copied",
-        "hint": "— Click empty area on timeline to paste",
         "cancel": "Cancel (Esc)"
     },
     "window": {
@@ -151,6 +155,41 @@
         "importSuccess": "Data imported successfully!",
         "importError": "Invalid data format.",
         "parseError": "Failed to parse file.",
-        "deleteConfirmation": "Are you sure you want to delete this event?"
+        "deleteConfirmation": "Delete this record?",
+        "nothingToExport": "Nothing to export.",
+        "saveError": "Save failed, please retry"
+    },
+    "sync": {
+        "title": "Sync",
+        "revision": "Central revision v{{revision}}",
+        "neverSynced": "Not synced yet",
+        "pending": "{{count}} pending upload(s)",
+        "lastSync": "Last sync {{time}}",
+        "conflicts": "{{count}} conflict/rejection(s)",
+        "discard": "Discard local",
+        "reapply": "Reapply",
+        "reset": "Reset and resync",
+        "resetHint": "Reset clears the local mirror, the upload queue, conflicts and the device sequence, then pulls a fresh full snapshot.",
+        "serverChanged": "The server changed; you must confirm resetting the connection.",
+        "revisionRegressed": "The server revision is older than this device; you must confirm resetting the connection.",
+        "sequenceMismatch": "The device sequence no longer matches the server. Uploading is stopped until you reset the connection.",
+        "phase": {
+            "idle": "Idle",
+            "syncing": "Syncing…",
+            "uploading": "Uploading…",
+            "downloading": "Downloading…",
+            "error": "Sync failed"
+        }
+    },
+    "reminder": {
+        "upcoming": "Starting soon / ongoing",
+        "ongoing": "Ongoing"
+    },
+    "clash": {
+        "detected": "Schedule overlap detected",
+        "message": "{{count}} overlap(s) in your schedule.",
+        "message_plural": "{{count}} overlaps in your schedule.",
+        "jump": "Jump to",
+        "unknown": "Unknown"
     }
 }

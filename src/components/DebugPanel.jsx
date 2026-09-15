@@ -35,9 +35,7 @@ export default function DebugPanel() {
         // also skips them so the panel stays clean.
         const SKIP = [
             /i18next is made possible/,
-            /RxDB Open Core/,
             /free Dexie\.js/,
-            /setPremiumFlag/,
             /Blocked aria-hidden/,
         ];
 

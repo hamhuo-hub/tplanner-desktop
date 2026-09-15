@@ -3,12 +3,18 @@
         "title": "tPlanner",
         "switchLanguage": "切换语言",
         "printCalendar": "打印日历",
-        "displayTimezone": "显示时区"
+        "displayTimezone": "显示时区",
+        "todayWidget": "今日便签",
+        "signOut": "退出登录"
     },
     "nav": {
         "prev": "前两个月",
         "today": "今天",
-        "next": "后两个月"
+        "next": "后两个月",
+        "inbox": "收件箱",
+        "date": "日期",
+        "dateView": "日期视图",
+        "switchLayout": "切换列表 / 时间轴"
     },
     "actions": {
         "export": "导出",
@@ -27,7 +33,11 @@
         "confirm": "确认",
         "merge": "合并",
         "done": "完成",
-        "syncNow": "立即同步"
+        "syncNow": "立即同步",
+        "addTask": "添加任务",
+        "addNote": "添加随笔",
+        "exportIcs": "导出 ICS",
+        "exportBackup": "导出 jCal 备份"
     },
     "recurrence": {
         "none": "无",
@@ -35,7 +45,16 @@
         "weekly": "每周",
         "monthly": "每月",
         "count": "重复次数",
-        "max": "(最大 50)"
+        "max": "(最大 50)",
+        "countHint": "0 表示不限次数",
+        "exceptions": "{{count}} 个例外",
+        "deleteWholeSeries": "这是重复任务，将删除整条记录及其例外。",
+        "unsupportedPreserved": "编辑器只提供日/周/月三种规则；其他规则会原样保留。",
+        "occurrences": "次",
+        "member": "第 {{index}} 次",
+        "setRepeat": "设置重复",
+        "editSeries": "修改重复系列",
+        "unsupportedRule": "此任务使用了较新的重复规则：普通编辑会原样保留，选择“不重复”或其他规则才会改写它。"
     },
     "event": {
         "title": "标题",
@@ -51,21 +70,19 @@
         "details": "事件详情",
         "timeLabel": "时间",
         "notePlaceholder": "在此输入详细备注...",
-        "typeReminder": "提醒",
-        "typeEvent": "提醒",
-        "typeStatus": "状态",
-        "typeTask": "任务",
         "checklist": "子任务",
         "checklistItem": "项目...",
         "recurrence": "重复",
         "allDay": "全天",
         "originalTz": "原始时区:",
         "copySuffix": "（副本）",
-        "subtaskBlocked": "请先完成子任务（{{done}}/{{total}}）"
-    },
-    "reminder": {
-        "upcoming": "即将到来的提醒",
-        "ongoing": "正在进行"
+        "subtaskBlocked": "请先完成子任务（{{done}}/{{total}}）",
+        "scheduled": "安排时间",
+        "dateOnly": "仅日期",
+        "noTimeHint": "不安排时间的任务只出现在收件箱，不会自动获得日期。",
+        "titleRequired": "请填写标题",
+        "startRequired": "请选择开始时间",
+        "invalidDates": "结束时间必须晚于开始时间"
     },
     "timezones": {
         "default": "北京时间（默认）",
@@ -79,6 +96,10 @@
         "Pacific_Auckland": "奥克兰 (NZST/NZDT)"
     },
     "task": {
+        "today": "今天",
+        "inbox": "收件箱",
+        "noTime": "无时间",
+        "empty": "这里还没有任务。",
         "overdueDetected": "已逾期任务",
         "overdue": "已逾期",
         "upcoming": "即将截止",
@@ -95,25 +116,9 @@
         "copy": "复制",
         "delete": "删除"
     },
-    "clash": {
-        "detected": "检测到日程冲突",
-        "message": "您的日程中有 {{count}} 处重叠。",
-        "message_plural": "您的日程中有 {{count}} 处重叠。",
-        "jump": "跳转至",
-        "unknown": "未知"
-    },
-    "timeline": {
-        "localTime": "本地时间",
-        "localTimeShort": "本地"
-    },
     "selection": {
         "count": "已选中 {{count}} 项",
         "delete": "批量删除",
-        "cancel": "取消 (Esc)"
-    },
-    "paste": {
-        "copied": "已复制",
-        "hint": "— 点击时间轴空白处粘贴",
         "cancel": "取消 (Esc)"
     },
     "window": {
@@ -151,6 +156,41 @@
         "importSuccess": "数据导入成功！",
         "importError": "数据格式无效。",
         "parseError": "文件解析失败。",
-        "deleteConfirmation": "您确定要删除此事件吗？"
+        "deleteConfirmation": "确定删除这条记录吗？",
+        "nothingToExport": "没有可导出的记录。",
+        "saveError": "保存失败，请重试"
+    },
+    "sync": {
+        "title": "同步",
+        "revision": "中央修订 v{{revision}}",
+        "neverSynced": "尚未同步",
+        "pending": "待上传 {{count}} 项",
+        "lastSync": "上次同步 {{time}}",
+        "conflicts": "{{count}} 项冲突/拒绝",
+        "discard": "放弃本地版本",
+        "reapply": "重新提交",
+        "reset": "重置并重新同步",
+        "resetHint": "重置会清空本机镜像、待上传队列、冲突记录与设备序号，然后从服务器重新拉取完整快照。",
+        "serverChanged": "服务器已更换，需要你确认重置连接。",
+        "revisionRegressed": "服务器修订号低于本机，需要你确认重置连接。",
+        "sequenceMismatch": "设备序号与服务器不一致，客户端已停止上传，需要重置连接。",
+        "phase": {
+            "idle": "空闲",
+            "syncing": "同步中…",
+            "uploading": "上传中…",
+            "downloading": "下载中…",
+            "error": "同步失败"
+        }
+    },
+    "reminder": {
+        "upcoming": "即将开始 / 进行中",
+        "ongoing": "进行中"
+    },
+    "clash": {
+        "detected": "检测到日程重叠",
+        "message": "有 {{count}} 处时间重叠。",
+        "message_plural": "有 {{count}} 处时间重叠。",
+        "jump": "跳转至",
+        "unknown": "未知"
     }
 }

@@ -4,6 +4,14 @@ import EventRow from './EventRow';
 import { useRef, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+/**
+ * Timeline view: scheduled records positioned on a 24-hour axis, one row per day.
+ *
+ * Rows are the read-only jCal projection from `src/syncV5/document.js`. Records with no
+ * instant are absent here — they belong to the Inbox (or to their date-only cell), and the
+ * timeline never manufactures a time to place them. Rescheduling by dragging is an ordinary
+ * canonical edit: the caller writes DTSTART/DUE through the V5 store.
+ */
 export default function Timeline({ startDate, endDate, events, onEventClick, onAddEvent, highlight, onLoadPrev, onLoadNext, onUpdateEvent, clashes, travelTimezone, onToggleTaskComplete, journals, onSaveJournal, onContextMenu, selectedIds, onSelectionChange }) {
     const { t } = useTranslation();
     const scrollContainerRef = useRef(null);
