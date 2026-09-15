@@ -223,12 +223,13 @@ export function createStore({ databaseName = DATABASE_NAME, dexie, deviceLabel =
             return mutate((state) => {
                 const queued = state.outbox.filter((row) => row.uid === uid);
                 const follower = state.inflight?.uid === uid ? state.inflight : null;
-                // The successor's base advances only from the predecessor's own applied
-                // receipt, never from a mirror another device may have moved.
-                const base = follower && follower.status === INFLIGHT
-                    && follower.appliedRevision !== null && follower.appliedRevision !== undefined
-                    ? follower.appliedRevision
-                    : baseRevision;
+                // The successor's base advances ONLY from the predecessor's own applied
+                // receipt. While that predecessor is still in flight the successor keeps
+                // its own base: it must not adopt `sentBaseRevision`, because a successor is
+                // a fresh edit of the record rather than a continuation of the in-flight
+                // command, and it must never be rebased onto a mirror another device moved.
+                const applied = follower?.appliedRevision;
+                const base = applied !== null && applied !== undefined ? applied : baseRevision;
                 return {
                     ...state,
                     outbox: [
@@ -277,7 +278,16 @@ export function createStore({ databaseName = DATABASE_NAME, dexie, deviceLabel =
                 return {
                     ...state,
                     outbox: rest,
-                    inflight: { ...next, sequence, status: INFLIGHT, appliedRevision: null, sentAt: null },
+                    inflight: {
+                        ...next,
+                        sequence,
+                        status: INFLIGHT,
+                        // The exact guard this command was sent with, kept for diagnostics and
+                        // so a post-crash retry can be compared byte-for-byte.
+                        sentBaseRevision: next.baseRevision,
+                        appliedRevision: null,
+                        sentAt: null,
+                    },
                     nextSequence: sequence + 1,
                 };
             });
