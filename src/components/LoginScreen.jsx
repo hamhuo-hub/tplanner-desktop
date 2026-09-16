@@ -1,37 +1,35 @@
 import { useState } from 'react'
-import { ArrowRight, CalendarDays, Eye, EyeOff, LockKeyhole } from 'lucide-react'
+import { ArrowRight, CalendarDays, LockKeyhole } from 'lucide-react'
 import { DEFAULT_SERVER_URL, clearSession, saveSessionConfig, verifySession } from '../syncV5/session.js'
 import './LoginScreen.css'
 
 /**
- * Session setup for the single V5 endpoint: server address + bearer token.
+ * Session setup for the single V5 endpoint: just the server address.
  *
- * There is no account/PIN concept in the V5 contract — the token the server requires is the
+ * There is no account/PIN concept in the V5 contract — the password the server requires is the
  * only credential. The form verifies against `GET /tplanner/v5/health` before persisting,
  * so the app never claims to be connected to a server it cannot reach.
  */
 function LoginScreen({ onConnected, onLogout }) {
     const [serverUrl, setServerUrl] = useState(DEFAULT_SERVER_URL)
-    const [token, setToken] = useState('')
-    const [showToken, setShowToken] = useState(false)
     const [remember, setRemember] = useState(true)
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [error, setError] = useState('')
 
     const handleSubmit = async (event) => {
         event.preventDefault()
-        if (!serverUrl.trim() || !token.trim()) {
-            setError('请输入服务器地址和访问令牌')
+        if (!serverUrl.trim()) {
+            setError('请输入服务器地址')
             return
         }
         setError('')
         setIsSubmitting(true)
         try {
-            const health = await verifySession({ serverUrl, token })
-            saveSessionConfig({ serverUrl: health.baseUrl, token, remember })
-            onConnected?.({ serverUrl: health.baseUrl, token })
+            const health = await verifySession({ serverUrl })
+            saveSessionConfig({ serverUrl: health.baseUrl, remember })
+            onConnected?.({ serverUrl: health.baseUrl })
         } catch (requestError) {
-            setError(requestError?.message || '无法连接同步服务，请检查地址与令牌')
+            setError(requestError?.message || '无法连接同步服务，请检查地址')
         } finally {
             setIsSubmitting(false)
         }
@@ -76,7 +74,7 @@ function LoginScreen({ onConnected, onLogout }) {
                     <div className="login-card-copy">
                         <p className="login-card-kicker">CONNECT</p>
                         <h2>连接你的工作空间</h2>
-                        <p>填写同步服务地址与访问令牌。令牌只会以 Authorization 头发送。</p>
+                        <p>只需要同步服务地址，没有账号也没有口令要填。</p>
                     </div>
 
                     <form className="login-form" onSubmit={handleSubmit} noValidate>
@@ -91,28 +89,6 @@ function LoginScreen({ onConnected, onLogout }) {
                                 autoComplete="url"
                                 autoFocus
                             />
-                        </label>
-
-                        <label className="login-field">
-                            <span>访问令牌</span>
-                            <span className="login-password-wrap">
-                                <input
-                                    className="tp-field"
-                                    type={showToken ? 'text' : 'password'}
-                                    value={token}
-                                    onChange={(event) => setToken(event.target.value)}
-                                    placeholder="访问令牌"
-                                    autoComplete="off"
-                                />
-                                <button
-                                    type="button"
-                                    className="login-password-toggle"
-                                    onClick={() => setShowToken((visible) => !visible)}
-                                    aria-label={showToken ? '隐藏令牌' : '显示令牌'}
-                                >
-                                    {showToken ? <EyeOff size={18} /> : <Eye size={18} />}
-                                </button>
-                            </span>
                         </label>
 
                         <div className="login-form-meta">

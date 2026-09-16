@@ -53,7 +53,6 @@ function createEmitter() {
 
 export function createSyncEngine({
     serverUrl,
-    token,
     store = createStore(),
     transport = null,
     fetchFn,
@@ -61,7 +60,7 @@ export function createSyncEngine({
     now = () => Date.now(),
 } = {}) {
     const emitter = createEmitter();
-    const client = transport ?? createTransport({ baseUrl: serverUrl, token, ...(fetchFn ? { fetchFn } : {}) });
+    const client = transport ?? createTransport({ baseUrl: serverUrl, ...(fetchFn ? { fetchFn } : {}) });
 
     const status = {
         phase: 'idle',

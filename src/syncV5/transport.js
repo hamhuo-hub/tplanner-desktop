@@ -205,35 +205,35 @@ export function validateHealth(payload) {
 }
 
 /**
- * Turns whatever the user pasted into the exact `Authorization` value the server expects.
- * The server only accepts `Bearer <token>`, so the bare token is what the field means; a value
- * that already carries the scheme is accepted too rather than being doubled.
+ * The single access password, hardcoded.
+ *
+ * It must match `SYNC_PASSWORD` in sync-server/src/v5/api.js and the Android client's
+ * V5Transport.kt. It exists only to stop casual scanning of the hostname from writing to the
+ * server; it is not a security boundary, and the domain must not be published.
  */
-export function authorizationHeader(token) {
-    const trimmed = String(token ?? '').trim();
-    if (!trimmed) return '';
-    return /^Bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
+export const SYNC_PASSWORD = '2004';
+
+/** The exact `Authorization` value the server expects. */
+export function authorizationHeader() {
+    return `Bearer ${SYNC_PASSWORD}`;
 }
 
 /**
  * @param {object} options
  * @param {string} options.baseUrl          server root, e.g. https://sync.hamhuo.top
- * @param {string} options.token            the bare access token; sent as `Authorization: Bearer <token>`
  * @param {number} [options.timeoutMs]
  * @param {number} [options.maxBytes]
  * @param {typeof fetch} [options.fetchFn]
  */
 export function createTransport({
     baseUrl,
-    token,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     maxBytes = DEFAULT_MAX_BYTES,
     fetchFn = (...args) => fetch(...args),
 } = {}) {
     const base = normalizeBaseUrl(baseUrl);
     assertSecureBaseUrl(base);
-    if (!token) throw new TransportError('缺少访问令牌');
-    const authorization = authorizationHeader(token);
+    const authorization = authorizationHeader();
 
     async function request(path, { method = 'GET', body = null } = {}) {
         const controller = new AbortController();

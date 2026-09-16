@@ -25,19 +25,19 @@ const IDLE_STATUS = {
 };
 
 export default function useSyncV5(config) {
-    const { serverUrl, token } = config ?? {};
+    const { serverUrl } = config ?? {};
     const [status, setStatus] = useState(() => currentEngine()?.getStatus() ?? IDLE_STATUS);
     const [documents, setDocuments] = useState([]);
     const engineRef = useRef(null);
 
     useEffect(() => {
-        if (!serverUrl || !token) {
+        if (!serverUrl) {
             setStatus(IDLE_STATUS);
             setDocuments([]);
             return undefined;
         }
         let disposed = false;
-        const instance = getEngine({ serverUrl, token });
+        const instance = getEngine({ serverUrl });
         engineRef.current = instance;
         setStatus({ ...instance.getStatus() });
 
@@ -56,7 +56,7 @@ export default function useSyncV5(config) {
             disposed = true;
             unsubscribe();
         };
-    }, [serverUrl, token]);
+    }, [serverUrl]);
 
     const syncNow = useCallback(async () => {
         const instance = engineRef.current;
