@@ -101,7 +101,7 @@ function LoginScreen({ onConnected, onLogout }) {
                                     type={showToken ? 'text' : 'password'}
                                     value={token}
                                     onChange={(event) => setToken(event.target.value)}
-                                    placeholder="Bearer 令牌"
+                                    placeholder="访问令牌"
                                     autoComplete="off"
                                 />
                                 <button

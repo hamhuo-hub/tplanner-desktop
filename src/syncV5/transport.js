@@ -205,9 +205,20 @@ export function validateHealth(payload) {
 }
 
 /**
+ * Turns whatever the user pasted into the exact `Authorization` value the server expects.
+ * The server only accepts `Bearer <token>`, so the bare token is what the field means; a value
+ * that already carries the scheme is accepted too rather than being doubled.
+ */
+export function authorizationHeader(token) {
+    const trimmed = String(token ?? '').trim();
+    if (!trimmed) return '';
+    return /^Bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
+}
+
+/**
  * @param {object} options
  * @param {string} options.baseUrl          server root, e.g. https://sync.hamhuo.top
- * @param {string} options.token            sent verbatim as `Authorization`
+ * @param {string} options.token            the bare access token; sent as `Authorization: Bearer <token>`
  * @param {number} [options.timeoutMs]
  * @param {number} [options.maxBytes]
  * @param {typeof fetch} [options.fetchFn]
@@ -222,13 +233,14 @@ export function createTransport({
     const base = normalizeBaseUrl(baseUrl);
     assertSecureBaseUrl(base);
     if (!token) throw new TransportError('缺少访问令牌');
+    const authorization = authorizationHeader(token);
 
     async function request(path, { method = 'GET', body = null } = {}) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         let response;
         try {
-            const headers = { Authorization: token, Accept: 'application/json' };
+            const headers = { Authorization: authorization, Accept: 'application/json' };
             if (body !== null) headers['Content-Type'] = 'application/json';
             response = await fetchFn(`${base}${path}`, {
                 method,
