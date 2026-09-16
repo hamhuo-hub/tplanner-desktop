@@ -20,7 +20,8 @@ import { TIMEZONES } from './utils/constants';
 import useSyncV5 from './hooks/useSyncV5';
 import { clearSession, storedSession } from './syncV5/session.js';
 import {
-    dateGroups, duplicateTask, inboxRows, noteRows, noteUpdate, rowsOnDay, todayRows, viewRows, withChecklist,
+    dateGroups, duplicateTask, inboxRows, noteRows, noteUpdate, rowsOnDay, taskRows, todayRows, viewRows,
+    withChecklist, withOccurrenceCompleted, withOccurrenceExcluded,
 } from './syncV5/document.js';
 import { downloadIcs, exportToIcs } from './syncV5/ics.js';
 import { exportElectronProjection, showTodayWidget } from './syncV5/platform.js';
@@ -55,8 +56,9 @@ function PlannerApp({ session, onSignOut }) {
      * nothing below re-models a task.
      */
     const view = useMemo(() => {
-        const all = viewRows(documents, options);
-        const tasks = all.filter((row) => row.kind === 'task');
+        // `taskRows` expands a repeating record into one row per occurrence; the record's own
+        // row is used by every other projection below.
+        const tasks = taskRows(documents, options);
         return {
             tasks,
             notes: noteRows(documents, options),
@@ -185,8 +187,14 @@ function PlannerApp({ session, onSignOut }) {
         }
     };
 
+    /**
+     * Completing a repeating task completes ONE occurrence: that is a RECURRENCE-ID exception
+     * on the same record, which is how RFC 5545 spells per-instance state.
+     */
     const handleToggleComplete = (row, completed) => runSave(
-        () => saveDocument(row.document.withCompleted(completed)),
+        () => saveDocument(row.occurrence === null
+            ? row.document.withCompleted(completed)
+            : withOccurrenceCompleted(row.document, row.occurrence, completed)),
     );
 
     const handleToggleChecklist = (row, itemId, completed) => runSave(() => {
@@ -199,6 +207,12 @@ function PlannerApp({ session, onSignOut }) {
     });
 
     const handleDelete = (row) => runSave(async () => {
+        // Swiping one occurrence of a repeating task cancels that instance with EXDATE; it must
+        // not throw away the whole series. A plain record is still deleted outright.
+        if (row.occurrence !== null) {
+            await saveDocument(withOccurrenceExcluded(row.document, row.occurrence));
+            return;
+        }
         await sync.removeDocument(row.uid);
         if (selectedUid === row.uid) setSelectedUid(null);
     });
@@ -213,7 +227,13 @@ function PlannerApp({ session, onSignOut }) {
      */
     const handleTimelineUpdate = (updates) => runSave(async () => {
         for (const update of updates) {
-            const row = view.tasks.find((item) => item.uid === (update.uid ?? update.id));
+            // Rows are keyed by occurrence id; fall back to the record uid so a caller that
+            // still names the record keeps working. Either way the edit lands on the record
+            // (the series), because this build expresses per-occurrence state only as
+            // completed/cancelled, not as a per-occurrence time.
+            const key = update.uid ?? update.id;
+            const row = view.tasks.find((item) => item.id === key)
+                ?? view.tasks.find((item) => item.uid === key);
             if (!row) continue;
             const start = update.start instanceof Date ? update.start.getTime() : update.start;
             let due = update.end instanceof Date ? update.end.getTime() : update.end;
@@ -388,7 +408,8 @@ function PlannerApp({ session, onSignOut }) {
                         onAddEvent={(start) => openAdd(start)}
                         onUpdateEvent={handleTimelineUpdate}
                         onToggleTaskComplete={(id, completed) => {
-                            const row = view.tasks.find((item) => item.uid === id);
+                            // Rows are keyed by occurrence id, so match on `id`, not the record uid.
+                            const row = view.tasks.find((item) => item.id === id);
                             if (row) handleToggleComplete(row, completed);
                         }}
                         onSaveJournal={handleSaveNote}

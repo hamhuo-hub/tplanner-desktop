@@ -23,6 +23,7 @@ import {
     p,
     property,
     task,
+    utc,
 } from '../../sync-v5/jcal.mjs';
 import { ruleText } from '../../sync-v5/jcal.mjs';
 
@@ -31,10 +32,21 @@ export { task as buildTask, journal as buildNote };
 
 const CONTENT = new Set(['vtodo', 'vjournal']);
 
+/**
+ * The master component inside a specific calendar array.
+ *
+ * Always resolve the master from the array you are about to mutate: `document.calendar`
+ * returns a fresh copy on every read, so a component obtained from the document is NOT the
+ * same object as one obtained from a local `calendar` variable.
+ */
+function masterOf(calendar) {
+    return calendar[2].find((component) => CONTENT.has(component[0])
+        && property(component, 'recurrence-id') === null);
+}
+
 /** The master component: the standard component that is not a recurrence exception. */
 export function masterComponent(document) {
-    return document.calendar[2].find((component) => CONTENT.has(component[0])
-        && property(component, 'recurrence-id') === null);
+    return masterOf(document.calendar);
 }
 
 export function isTask(document) {
@@ -95,6 +107,218 @@ export function withRecurrence(document, rule) {
 export function recurrenceText(document) {
     const rule = document.recurrence;
     return rule ? ruleText(rule) : null;
+}
+
+// ── Recurrence expansion (read-only) ─────────────────────────────────────────
+//
+// A repeating task is ONE canonical document, and docs/sync-v5.md requires readers to expand
+// its occurrences locally instead of synchronising generated records. Per-instance state rides
+// on the standard components RFC 5545 defines for exactly this: a RECURRENCE-ID exception
+// carries "this occurrence is done", and EXDATE cancels one occurrence. Nothing here is ever
+// written back as a stored fact.
+
+export const MAX_TASK_RECURRENCE_COUNT = 50;
+
+/** Occurrences are projected inside a window around now; the record itself stays unbounded. */
+const OCCURRENCE_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
+
+/** Occurrence-scoped row id, mirroring the Android client's `uid@epochSecond` form. */
+export function occurrenceKey(uid, instantMs) {
+    return `${uid}@${Math.floor(instantMs / 1000)}`;
+}
+
+/** Zone offset of `utcMs` in `zone`, in milliseconds. */
+function zoneOffsetMs(zone, utcMs) {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+        timeZone: zone,
+        hourCycle: 'h23',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+    }).formatToParts(new Date(utcMs)).map((part) => [part.type, part.value]));
+    return Date.UTC(+parts.year, +parts.month - 1, +parts.day,
+        +parts.hour, +parts.minute, +parts.second) - utcMs;
+}
+
+function localParts(zone, ms) {
+    const shifted = new Date(ms + zoneOffsetMs(zone, ms));
+    return {
+        year: shifted.getUTCFullYear(),
+        month: shifted.getUTCMonth() + 1,
+        day: shifted.getUTCDate(),
+        hour: shifted.getUTCHours(),
+        minute: shifted.getUTCMinutes(),
+        second: shifted.getUTCSeconds(),
+    };
+}
+
+function fromLocalParts(zone, parts) {
+    const guess = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+    const first = guess - zoneOffsetMs(zone, guess);
+    return guess - zoneOffsetMs(zone, first);
+}
+
+/**
+ * Advances the wall clock by `steps` periods. Recurrence is a calendar concept, so it moves in
+ * local time: a daily 20:00 task stays at 20:00 across a DST change instead of drifting an hour.
+ * Monthly steps clamp to the last valid day, so 31 Jan plus one month is 28/29 Feb.
+ */
+function stepLocal(anchorMs, frequency, steps, zone) {
+    const parts = localParts(zone, anchorMs);
+    if (steps === 0) return anchorMs;
+    if (frequency === 'DAILY' || frequency === 'WEEKLY') {
+        const days = frequency === 'DAILY' ? steps : steps * 7;
+        const shifted = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days));
+        return fromLocalParts(zone, {
+            ...parts,
+            year: shifted.getUTCFullYear(),
+            month: shifted.getUTCMonth() + 1,
+            day: shifted.getUTCDate(),
+        });
+    }
+    const total = parts.year * 12 + (parts.month - 1) + steps;
+    const year = Math.floor(total / 12);
+    const month = (total % 12 + 12) % 12 + 1;
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return fromLocalParts(zone, { ...parts, year, month, day: Math.min(parts.day, lastDay) });
+}
+
+/** Instants cancelled with EXDATE on the master component. */
+export function excludedInstants(document) {
+    const result = new Set();
+    for (const prop of masterComponent(document)[1]) {
+        if (prop[0] !== 'exdate') continue;
+        for (let slot = 3; slot < prop.length; slot += 1) {
+            const ms = Date.parse(String(prop[slot]));
+            if (Number.isFinite(ms)) result.add(ms);
+        }
+    }
+    return result;
+}
+
+/** Per-occurrence completion carried by RECURRENCE-ID exception components. */
+export function exceptionState(document) {
+    const result = new Map();
+    for (const component of exceptions(document)) {
+        const at = Date.parse(String(property(component, 'recurrence-id')[3]));
+        if (!Number.isFinite(at)) continue;
+        result.set(at, property(component, 'status')?.[3] === 'COMPLETED');
+    }
+    return result;
+}
+
+/**
+ * Occurrence instants of one document inside a window, inclusive of both ends.
+ *
+ * A rule this build cannot expand yields only DTSTART, so a rule written by another client is
+ * still visible rather than silently disappearing.
+ */
+export function occurrenceInstants(document, { timeZone, windowStart, windowEnd } = {}) {
+    const zone = timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const anchor = document.start;
+    if (anchor === null) return [];
+    const rule = document.recurrence;
+    if (rule === null) return [anchor];
+    const frequency = String(rule.freq ?? '').toUpperCase();
+    if (!['DAILY', 'WEEKLY', 'MONTHLY'].includes(frequency)) return [anchor];
+
+    const interval = Number.isInteger(rule.interval) && rule.interval > 0 ? rule.interval : 1;
+    const limit = Number.isInteger(rule.count) && rule.count > 0
+        ? Math.min(rule.count, MAX_TASK_RECURRENCE_COUNT)
+        : MAX_TASK_RECURRENCE_COUNT;
+    const untilText = typeof rule.until === 'string' ? rule.until : null;
+    const until = untilText === null ? null : Date.parse(untilText.endsWith('Z') ? untilText : `${untilText}Z`);
+    const excluded = excludedInstants(document);
+    const from = Number.isFinite(windowStart) ? windowStart : Date.now() - OCCURRENCE_WINDOW_MS;
+    const to = Number.isFinite(windowEnd) ? windowEnd : Date.now() + OCCURRENCE_WINDOW_MS;
+
+    const instants = [];
+    for (let index = 0; index < limit; index += 1) {
+        const at = stepLocal(anchor, frequency, index * interval, zone);
+        if (until !== null && Number.isFinite(until) && at > until) break;
+        if (at > to) break;
+        if (at >= from && !excluded.has(at)) instants.push(at);
+    }
+    return instants;
+}
+
+/**
+ * One row per occurrence for repeating tasks, one row per record for everything else.
+ *
+ * A record whose occurrences all fall outside the window keeps its master row: a projection
+ * must never hide a record that exists.
+ */
+export function expandRows(rows, options = {}) {
+    const expanded = [];
+    for (const row of rows) {
+        if (row.kind !== 'task' || !row.repeats || row.start === null) {
+            expanded.push(row);
+            continue;
+        }
+        const instants = occurrenceInstants(row.document, options);
+        if (instants.length === 0) {
+            expanded.push(row);
+            continue;
+        }
+        const state = exceptionState(row.document);
+        const duration = row.due === null ? 0 : row.due - row.start;
+        for (const at of instants) {
+            const due = row.due === null ? null : at + duration;
+            const dayKey = dayKeyOf(due ?? at, row.timeZone);
+            expanded.push({
+                ...row,
+                id: occurrenceKey(row.uid, at),
+                occurrence: at,
+                start: at,
+                due,
+                hasDue: due !== null,
+                end: due ?? at,
+                // An explicit exception wins; otherwise the record's own state applies.
+                completed: state.has(at) ? state.get(at) : row.completed,
+                dateKey: dayKey,
+                dayKey,
+            });
+        }
+    }
+    return expanded;
+}
+
+/**
+ * Marks one occurrence done (or not) with a RECURRENCE-ID exception of the same UID and kind.
+ * Any previous exception for that instant is replaced, so toggling is idempotent.
+ */
+export function withOccurrenceCompleted(document, occurrenceMs, completed) {
+    const calendar = document.calendar;
+    const master = masterComponent(document);
+    const components = calendar[2].filter((component) => {
+        if (!CONTENT.has(component[0])) return true;
+        const recurrenceId = property(component, 'recurrence-id');
+        if (recurrenceId === null) return true;
+        return Date.parse(String(recurrenceId[3])) !== occurrenceMs;
+    });
+    components.push([master[0], [
+        p('uid', 'text', property(master, 'uid')[3]),
+        p('dtstamp', 'date-time', property(master, 'dtstamp')[3]),
+        p('recurrence-id', 'date-time', utc(occurrenceMs)),
+        p('status', 'text', completed ? 'COMPLETED' : 'NEEDS-ACTION'),
+        p('completed', 'date-time', utc(Date.now())),
+    ], []]);
+    const next = calendar.slice();
+    next[2] = components;
+    return new JcalDocument(next);
+}
+
+/** Cancels exactly one occurrence with EXDATE, leaving the rule and the rest intact. */
+export function withOccurrenceExcluded(document, occurrenceMs) {
+    const calendar = document.calendar;
+    if (!excludedInstants(document).has(occurrenceMs)) {
+        // Mutate the master of THIS array, never one from a second `document.calendar` read.
+        masterOf(calendar)[1].push(p('exdate', 'date-time', utc(occurrenceMs)));
+    }
+    return new JcalDocument(calendar);
 }
 
 // ── Display projection ────────────────────────────────────────────────────────
@@ -160,6 +384,8 @@ export function viewRow(entry, { timeZone } = {}) {
         recurrence: document.recurrence,
         recurrenceText: recurrenceText(document),
         exceptionCount: exceptions(document).length,
+        /** Set by `expandRows` on a generated occurrence row; null on the record's own row. */
+        occurrence: null,
         revision: entry.revision ?? 0,
         pending: Boolean(entry.pending),
         conflicted: Boolean(entry.conflicted),
@@ -170,9 +396,12 @@ export function viewRows(entries, options = {}) {
     return entries.map((entry) => viewRow(entry, options));
 }
 
-/** Task rows only, notes excluded — the Inbox/Today/date views work on tasks. */
+/**
+ * Task rows for the Inbox/Today/date/timeline views, with repeating tasks expanded into one
+ * row per occurrence (see `expandRows`). Notes are excluded.
+ */
 export function taskRows(entries, options = {}) {
-    return viewRows(entries, options).filter((row) => row.kind === 'task');
+    return expandRows(viewRows(entries, options).filter((row) => row.kind === 'task'), options);
 }
 
 /**
