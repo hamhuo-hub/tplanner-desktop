@@ -47,7 +47,6 @@ npm run build
 ```
 
 Vite 开发服务器把 `/tplanner` 代理到 `TPLANNER_SYNC_PROXY_TARGET`（默认
-`https://sync.hamhuo.top`）。服务器地址与访问令牌在登录页配置，保存在本机，
 令牌只以 `Authorization` 头发出。
 
 ## 分支边界
