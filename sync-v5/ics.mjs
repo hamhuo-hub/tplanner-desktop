@@ -6,7 +6,7 @@
  * stores UTC or TZID-qualified local values, and floating times are never produced.
  */
 
-import { property, ruleText, instant } from './jcal.mjs';
+import { properties, property, ruleText, instant } from './jcal.mjs';
 
 const FOLD_OCTETS = 75;
 
@@ -52,6 +52,13 @@ function dateTimeProp(prop) {
   return [stamp(prop)];
 }
 
+/** RFC 5545 text for one slot of a possibly multi-valued date property. */
+function valueAt(prop, slot) {
+  const text = String(prop[slot]);
+  if (prop[2] === 'date') return text.replace(/-/g, '');
+  return text.endsWith('Z') ? text.replace(/[-:]/g, '') : text;
+}
+
 function componentLines(component) {
   const lines = [`BEGIN:${component[0].toUpperCase()}`];
   const push = (name, value) => lines.push(`${name}:${value}`);
@@ -95,6 +102,13 @@ function componentLines(component) {
   if (listId) lines.push(...fold(`X-TPLANNER-LIST-ID:${escapeText(listId[3])}`));
   if (color) push('X-TPLANNER-COLOR', String(color[3]));
   if (rrule) push('RRULE', ruleText(rrule[3]));
+  // Cancelled occurrences have to travel with the rule, or an import would resurrect days the
+  // user removed. EXDATE is a comma-separated list of date-times in RFC 5545.
+  for (const prop of properties(component, 'exdate')) {
+    const values = [];
+    for (let slot = 3; slot < prop.length; slot += 1) values.push(valueAt(prop, slot));
+    if (values.length > 0) push('EXDATE', values.join(','));
+  }
   if (status) push('STATUS', status[3]);
   if (completed) push('COMPLETED', stamp(completed));
   lines.push(`END:${component[0].toUpperCase()}`);
