@@ -2,7 +2,9 @@
 <html lang="en" data-tp-theme="light" data-tp-platform="web">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://sync.hamhuo.top http://localhost:* https://localhost:*; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" />
+    <!-- frame-ancestors 不在这里:作为 <meta> 浏览器会直接忽略它并打印警告。
+         它必须由服务器作为 HTTP 头发送,见 scripts/deploy/tplanner-web.Caddyfile。 -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://sync.hamhuo.top http://localhost:* https://localhost:*; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'" />
     <link rel="icon" type="image/png" href="/icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>tplanner</title>
