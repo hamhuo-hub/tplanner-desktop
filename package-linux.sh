@@ -1,4 +1,9 @@
 #!/bin/bash
+# Linux packaging wrapper (npm run package:linux).
+#
+# Only environment setup lives here — the packaging itself is scripts/package.mjs, the same
+# script the Windows target uses, so both targets agree on how the version is derived, how
+# it is written into package.json and which architecture is requested.
 set -e
 
 unset npm_config_prefix
@@ -11,11 +16,8 @@ else
     echo "nvm not found, using system node ($(node --version))"
 fi
 
-# Use Chinese mirror to download Electron binary
+# Use Chinese mirror to download Electron binary.
 export ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
 
-# Tag-derived version, injected via extraMetadata; package.json stays clean.
-V="$(node scripts/version.mjs)"
-
 npm run build
-npx electron-builder build --linux --config.extraMetadata.version="$V"
+exec node scripts/package.mjs --linux

@@ -26,7 +26,6 @@
       "dist-electron/**/*",
       "icon.ico",
       "icon.png",
-      "themes/**/*",
       "!node_modules/**/*"
     ],
     "extraResources": [],

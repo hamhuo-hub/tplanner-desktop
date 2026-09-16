@@ -47,7 +47,32 @@ npm run build
 ```
 
 Vite 开发服务器把 `/tplanner` 代理到 `TPLANNER_SYNC_PROXY_TARGET`（默认
-令牌只以 `Authorization` 头发出。
+`https://sync.hamhuo.top`）。访问口令写死在各端代码里，随请求头自动发出，不需要配置。
+
+## 版本与打包
+
+版本号的唯一来源是 git tag，且**只认已经推送到 origin 的 tag**：本地打了但没推的 tag
+不能让产物自称正式版，否则会出现「安装包写着 v1.2.3、远端根本没有这个 tag」。
+取不到远端时按未验证处理，退化成 `X.Y.Z-dev`。
+
+```bash
+npm run package          # Windows：nsis + portable
+npm run package:linux    # Linux：AppImage + deb
+```
+
+两个入口都是 `scripts/package.mjs`，它会先把推导出的版本写进 `package.json`
+（electron-builder 直接读这个字段，不再用 `--config.extraMetadata` 旁路），再调用
+electron-builder。`!node_modules/**/*` 是刻意的：main 进程只 require `electron`/`fs`/`path`，
+四个 Electron 入口都声明了 `external: ['electron']`，widget 用 vendored 的 `marked.umd.js`。
+
+发版：
+
+```bash
+npm run release -- patch     # 或 minor / major / 8.2.0
+```
+
+它会提交 `package.json` 的版本、打 annotated tag，然后**打印推送命令**。在 tag 推上去之前，
+这个提交上的任何构建都是 `-dev`。
 
 ## 分支边界
 
