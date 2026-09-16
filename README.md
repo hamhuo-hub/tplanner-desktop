@@ -25,11 +25,9 @@
 
 生产地址：
 
-- Web：`https://plan.hamhuo.top`
 - Sync V5：`https://sync.hamhuo.top/tplanner/v5`
-
-Web 生产站由 Caddy 独立提供 `/srv/tplanner-web/current` 静态文件，并只把
-`/tplanner/*` 反代到本机 API。部署 Web 不复制服务器代码。
+- 客户端：Android / Wear APK 与 Electron 桌面端。**不再有 Web 版**：
+  桌面端与曾经的网页版共用同一份渲染层，但只有 Electron 会被分发。
 
 ## 目录
 
@@ -51,16 +49,6 @@ npm run build
 Vite 开发服务器把 `/tplanner` 代理到 `TPLANNER_SYNC_PROXY_TARGET`（默认
 `https://sync.hamhuo.top`）。服务器地址与访问令牌在登录页配置，保存在本机，
 令牌只以 `Authorization` 头发出。
-
-## Web 部署
-
-具备 `hamhuo@192.168.1.9` SSH 权限的局域网主机执行：
-
-```bash
-npm run deploy:web
-```
-
-脚本会构建 `dist/`，上传为 `/srv/tplanner-web/releases/<release>`，校验并热重载 Caddy，再原子切换 `current` 链接；健康检查失败会恢复旧 Caddy 配置与旧链接。可用 `PI_HOST`、`PI_USER`、`PI_WEB_ROOT` 覆盖部署目标。
 
 ## 分支边界
 

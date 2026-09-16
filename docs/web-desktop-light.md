@@ -88,10 +88,13 @@ node scripts/widget-review-server.mjs
 node scripts/sync-light-tokens.mjs --check --source-root C:/Users/hamhuo/tplanner
 ```
 
-## Web 部署
+## Web 部署（已退役）
 
-2026-09-08 已通过 `npm run deploy:web` 发布提交 `1c7c5441c85c49f249024a6dcdce654cce7cb7a2` 到 `192.168.1.9`，地址为 <https://plan.hamhuo.top/>。发布目录为 `/srv/tplanner-web/releases/20260908075943-1c7c5441c85c`；前一版本 `20260901040756-3fd4f98b81b2` 保留可回退。
+2026-09-08 曾通过 `npm run deploy:web` 发布提交 `1c7c5441c85c49f249024a6dcdce654cce7cb7a2` 到 `192.168.1.9`，地址为 <https://plan.hamhuo.top/>。
 
-Caddy 配置验证、服务 active、本地与公网 HTTP 检查通过。服务器 HTML、CSS、JS 的 SHA-256 与本地构建一致；浏览器确认 `data-tp-theme=light`、canvas `#E5E8ED`、主按钮 `#F77128` / `#212021`。此次未登录生产账号或改动业务数据。
+该发布渠道已于 2026-09-16 退役：同一份渲染层现在只作为 Electron 桌面端分发，
+Web 生产站、Caddy 站点、Cloudflare 隧道入口与 CI 部署工作流一并移除。当时的
+验收结论（令牌一致性、`data-tp-theme=light`、canvas `#E5E8ED`、主按钮 `#F77128`）
+仍然适用于桌面端渲染层。
 
 Windows 安装包构建问题的处理见 [Windows 打包](windows-packaging.md)。

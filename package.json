@@ -9,8 +9,6 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "build:web": "vite build",
-    "deploy:web": "node scripts/deploy-web.mjs",
     "package": "npm run build && node scripts/package.mjs",
     "package:linux": "bash package-linux.sh",
     "release": "node scripts/release-bump.mjs"
