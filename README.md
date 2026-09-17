@@ -1,8 +1,17 @@
-# tPlanner Desktop + Web
+# tPlanner Desktop
 
-`master` 只承载桌面端、Web 前端与共享 Sync V5 协议核心。Android/Wear 在
-`mobile_andorid`，中央服务在 `sync_server`；三个分支共用
-`sync-v5/`（`jcal.mjs`、`ics.mjs`、`protocol/v5/*.schema.json`），CI 要求其内容逐字节一致。
+本仓库只承载桌面端（Electron + React + Vite）与共享的 Sync V5 协议核心。
+Android/Wear 与中央服务是**独立仓库**，不是本仓库的分支：
+
+| 仓库 | 职责 |
+| --- | --- |
+| `tplanner-desktop`（本仓库） | Electron 桌面客户端、渲染层、冻结的 Sync V5 契约 |
+| `tplanner-android` | Android 手机与 Wear OS 客户端 |
+| `tplanner-server` | Sync V5 中央服务（Fastify + SQLite 单写者） |
+
+三者各自持有 `sync-v5/`（`jcal.mjs`、`ics.mjs`、`protocol/v5/*.schema.json`）的**逐字节相同**副本。
+该目录是冻结契约，任何改动都必须三个仓库同时进行并保持内容一致；改动前请先确认另外两个仓库
+的 `sync-v5/` 树哈希与本仓库相同（`git rev-parse HEAD:sync-v5`）。
 
 ## 同步架构（Sync V5）
 
@@ -41,10 +50,13 @@
 ## 本地开发
 
 ```bash
-npm ci
+npm install
 npm run dev
 npm run build
 ```
+
+本仓库**不跟踪 `package-lock.json`**（见 `.gitignore` 中的 lockfile 策略），
+因此这里用 `npm install` 而不是 `npm ci`。
 
 Vite 开发服务器把 `/tplanner` 代理到 `TPLANNER_SYNC_PROXY_TARGET`（默认
 `https://sync.hamhuo.top`）。访问口令写死在各端代码里，随请求头自动发出，不需要配置。
@@ -74,9 +86,13 @@ npm run release -- patch     # 或 minor / major / 8.2.0
 它会提交 `package.json` 的版本、打 annotated tag，然后**打印推送命令**。在 tag 推上去之前，
 这个提交上的任何构建都是 `-dev`。
 
-## 分支边界
+## 仓库边界
 
-- 本分支不包含或部署 `sync-server/`，也不再包含 `src/syncV3/` 或 `sync-v3/`。
+- 本仓库不包含 `sync-server/`，也不包含 Android/Wear 代码或 Gradle 构建。
 - 禁止重新引入 `/tplanner/v3`、`/tplanner/events`、`/journals`、`/changes` 等路由。
 - 任务事实只能存在于规范 jCal 文档里：不得在传输元数据、SQL 列、适配器或第二个可变
   Task 模型中重复；未知的标准/扩展属性必须原样保留。
+- 不要为了「整理整个仓库」而修改 `sync-v5/`、给其他客户端加构建脚本，或删除本仓库
+  之外的 CI。跨仓库的契约变更必须同时改三个仓库，并在每个仓库各自提交。
+- 本仓库**没有 GitHub Actions workflow**。构建、lint 与打包都是本地命令，
+  发版靠 tag；如果以后要加 CI，请新建一个单独的提交，不要混进契约改动里。

@@ -6,9 +6,13 @@
 // that tag. When the tag cannot be verified the version degrades to `-dev`, which is the
 // honest answer.
 //
-//   HEAD exactly on a pushed v* tag  -> "4.2.0"
-//   HEAD after a v* tag              -> "4.2.0-dev" (+ "-dirty" when the tree is dirty)
-//   tag missing upstream / no git    -> "4.0.0-dev"
+//   HEAD exactly on a pushed desktop-v* tag -> "4.2.0"
+//   HEAD after a desktop-v* tag             -> "4.2.0-dev" (+ "-dirty" when the tree is dirty)
+//   tag missing upstream / no git           -> "4.0.0-dev"
+//
+// Release tags in this repository are namespaced `desktop-v<major>.<minor>.<patch>`.
+// The namespace is required: the tags were renamed when this repository was split out of
+// the monorepo, and mobile-* / server-* tags live in their own repositories now.
 //
 // The module only COMPUTES a version; writing it into package.json is the packaging and
 // release scripts' job (scripts/package.mjs, scripts/release-bump.mjs).
@@ -78,10 +82,10 @@ export function listPushedTags(remote = REMOTE) {
     }
 }
 
-/** Highest `v*` version present on the remote, or null when none is reachable. */
+/** Highest `desktop-v*` version present on the remote, or null when none is reachable. */
 export function latestPushedVersion(remote = REMOTE) {
     const versions = listPushedTags(remote)
-        .filter((name) => /^v\d/.test(name))
+        .filter((name) => /^desktop-v\d/.test(name))
         .map(parseSemver)
         .filter(Boolean);
     if (versions.length === 0) return null;
@@ -103,9 +107,9 @@ function parseSemver(text) {
  * @param {boolean} [options.quiet=false]        suppress the reason for a degraded version
  */
 export function computeVersion({ requirePushed = true, quiet = false } = {}) {
-    const exactTag = git(['describe', '--tags', '--match', 'v*', '--exact-match']);
+    const exactTag = git(['describe', '--tags', '--match', 'desktop-v*', '--exact-match']);
     const exact = parseSemver(exactTag);
-    const nearest = parseSemver(git(['describe', '--tags', '--match', 'v*', '--always']));
+    const nearest = parseSemver(git(['describe', '--tags', '--match', 'desktop-v*', '--always']));
     const dirty = git(['status', '--porcelain']) !== '';
 
     const parts = exact ?? nearest ?? (() => {
