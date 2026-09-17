@@ -4,6 +4,14 @@
   "version": "0.0.0",
   "type": "module",
   "main": "dist-electron/main.cjs",
+  "description": "tPlanner 桌面端：本地优先的日程与任务客户端，与手机 / 手表共用 Sync V5",
+  "author": "tPlanner <hamhuo@outlook.com>",
+  "homepage": "https://github.com/hamhuo-hub/tplanner",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hamhuo-hub/tplanner.git"
+  },
   "scripts": {
     "dev": "vite --open",
     "build": "tsc -b && vite build",
