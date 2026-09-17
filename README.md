@@ -75,7 +75,9 @@ npm run package:linux    # Linux：AppImage + deb
 两个入口都是 `scripts/package.mjs`，它会先把推导出的版本写进 `package.json`
 （electron-builder 直接读这个字段，不再用 `--config.extraMetadata` 旁路），再调用
 electron-builder。`!node_modules/**/*` 是刻意的：main 进程只 require `electron`/`fs`/`path`，
-四个 Electron 入口都声明了 `external: ['electron']`，widget 用 vendored 的 `marked.umd.js`。
+四个 Electron 入口都声明了 `external: ['electron']`。Today 小窗是 Vite 构建出的 React 页面，
+依赖已打进 `dist-electron/assets/`；Notes 小窗仍是原样复制的 renderer，用 vendored 的
+`marked.umd.js`。
 
 发版：
 

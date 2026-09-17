@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh" data-tp-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self';">
+  <title>tPlanner — 今日</title>
+  <!-- Built to dist-electron/widget.html, the path main.js loads with loadFile(). Every URL
+       below stays relative so the page resolves inside dist-electron in both dev and a
+       packaged build. The stylesheets stay in <head> so the frameless, transparent window
+       never paints an unstyled frame. -->
+  <link rel="stylesheet" href="/design-assets/tokens/generated/tplanner-light.css">
+  <link rel="stylesheet" href="/src/widgets/shared-widget.css">
+  <link rel="stylesheet" href="/src/widgets/widget.css">
+</head>
+<body>
+<!-- React owns everything inside #app, including the loading and error states. -->
+<div id="app"></div>
+<script type="module" src="/src/widgets/today.jsx"></script>
+</body>
+</html>
